@@ -2,22 +2,16 @@ from __future__ import annotations
 
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
-from io import BytesIO
 from typing import Any, Protocol
 
 import httpx
 
 from app.audio import merge_audio_clips  # pyright: ignore[reportMissingImports]
 from app.podcast_clients import (  # pyright: ignore[reportMissingImports]
-    AzurePodcastBlobStore,
     DEFAULT_AUDIO_VOICE,
-    FalCoverGenerator,
-    OpenAIScriptGenerator,
     PodcastClientError,
     PodcastTimeoutError,
-    SlngTTSClient,
 )
-from app.podcast_repository import PodcastRepository  # pyright: ignore[reportMissingImports]
 from app.podcast_schemas import PodcastDetail, PodcastScript
 from app.vector_store import VectorPoint  # pyright: ignore[reportMissingImports]
 
@@ -79,23 +73,6 @@ AudioMerger = Callable[[Sequence[bytes]], bytes]
 class PodcastGenerationResult:
     podcast: PodcastDetail
     cover_used_fallback: bool = False
-
-
-def merge_audio_clips(clips: Sequence[bytes]) -> bytes:
-    if not clips:
-        raise ValueError("no audio clips were generated")
-
-    from pydub import AudioSegment  # pyright: ignore[reportMissingImports]
-
-    merged = AudioSegment.empty()
-    for clip in clips:
-        if not clip:
-            raise ValueError("audio clip was empty")
-        merged += AudioSegment.from_file(BytesIO(clip), format="mp3")
-
-    output = BytesIO()
-    merged.export(output, format="mp3")
-    return output.getvalue()
 
 
 async def generate_podcast(
@@ -176,7 +153,7 @@ def bound_script(script: PodcastScript, *, max_parts: int) -> PodcastScript:
     return PodcastScript(parts=script.parts[:max_parts])
 
 
-def synthesize_script_audio(script: PodcastScript, *, tts_client: SlngTTSClient) -> list[bytes]:
+def synthesize_script_audio(script: PodcastScript, *, tts_client: SupportsTTSClient) -> list[bytes]:
     audio_clips: list[bytes] = []
 
     for part in script.parts:
