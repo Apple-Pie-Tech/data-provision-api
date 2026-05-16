@@ -1,11 +1,17 @@
 from __future__ import annotations
 
-from typing import Any, cast
+from typing import Any, Protocol, cast
 
 import psycopg
 from psycopg.rows import dict_row
 
 from app.config import get_settings
+
+
+class SupportsDatabaseConnection(Protocol):
+    def cursor(self) -> Any: ...
+
+    def commit(self) -> None: ...
 
 
 CREATE_PODCASTS_TABLE_SQL = """
@@ -33,20 +39,20 @@ def create_connection() -> psycopg.Connection[Any]:
     return psycopg.connect(settings.database_url, row_factory=cast(Any, dict_row))
 
 
-def _create_tables(connection: psycopg.Connection[Any]) -> None:
+def _create_tables(connection: SupportsDatabaseConnection) -> None:
     with connection.cursor() as cursor:
         cursor.execute(CREATE_PODCASTS_TABLE_SQL)
 
 
-def init_db(connection: psycopg.Connection[Any] | None = None) -> None:
+def init_db(connection: SupportsDatabaseConnection | None = None) -> None:
     if connection is None:
         with create_connection() as opened_connection:
             _create_tables(opened_connection)
             opened_connection.commit()
-        return
+            return
 
     _create_tables(connection)
     connection.commit()
 
 
-__all__ = ["CREATE_PODCASTS_TABLE_SQL", "create_connection", "init_db"]
+__all__ = ["CREATE_PODCASTS_TABLE_SQL", "SupportsDatabaseConnection", "create_connection", "init_db"]

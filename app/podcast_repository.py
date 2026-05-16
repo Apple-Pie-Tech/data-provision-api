@@ -7,6 +7,7 @@ from uuid import uuid4
 
 from app.db import create_connection, init_db  # pyright: ignore[reportMissingImports]
 from app.podcast_schemas import PodcastDetail, PodcastListItem, PodcastScript, PodcastStatus
+from psycopg.abc import QueryNoTemplate
 
 
 PENDING = "pending"
@@ -19,7 +20,18 @@ ALLOWED_STATUSES = {PENDING, RUNNING, COMPLETED, FAILED}
 
 class PodcastRepository:
     def __init__(self, connection: Any | None = None) -> None:
+        self._owns_connection = connection is None
         self._connection = connection or create_connection()
+        self._closed = False
+
+    def close(self) -> None:
+        if self._closed or not self._owns_connection:
+            return
+
+        close = getattr(self._connection, "close", None)
+        if callable(close):
+            close()
+        self._closed = True
 
     def init_db(self) -> None:
         init_db(self._connection)
@@ -145,7 +157,7 @@ class PodcastRepository:
     def _write_and_return_one(self, query: str, params: tuple[Any, ...]) -> Mapping[str, Any]:
         try:
             with self._connection.cursor() as cursor:
-                cursor.execute(query, params)
+                cursor.execute(cast(QueryNoTemplate, query), params)
                 row = cursor.fetchone()
             self._connection.commit()
             if row is None:
