@@ -146,3 +146,47 @@ async def test_reader_returns_empty_list_for_empty_collection() -> None:
     points = await reader.read_points()
 
     assert points == []
+
+
+@pytest.mark.asyncio
+async def test_reader_filters_points_by_label_and_enforces_max_chunks() -> None:
+    client = FakeQdrantClient(
+        pages=[
+            (
+                [
+                    SimpleNamespace(id="one", payload={"label": "Topic A"}),
+                    SimpleNamespace(id="two", payload={"label": "Topic B"}),
+                    SimpleNamespace(id="three", payload={"label": "Topic A"}),
+                    SimpleNamespace(id="four", payload={"label": "Topic A"}),
+                ],
+                None,
+            )
+        ]
+    )
+    reader = QdrantPointReader(client, "data_provision_points", max_chunks=2)
+
+    points = await reader.read_points_for_label("  Topic A  ")
+
+    assert points == [
+        VectorPoint(id="one", label="Topic A"),
+        VectorPoint(id="three", label="Topic A"),
+    ]
+    assert client.calls == [
+        {
+            "collection_name": "data_provision_points",
+            "limit": 256,
+            "offset": None,
+            "with_payload": True,
+            "with_vectors": False,
+        }
+    ]
+
+
+@pytest.mark.asyncio
+async def test_reader_returns_empty_list_for_missing_or_blank_label() -> None:
+    client = FakeQdrantClient(pages=[([], None)])
+    reader = QdrantPointReader(client, "data_provision_points", max_chunks=3)
+
+    assert await reader.read_points_for_label(None) == []
+    assert await reader.read_points_for_label("   ") == []
+    assert client.calls == []

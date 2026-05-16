@@ -36,10 +36,12 @@ class QdrantPointReader:
         collection_name: str,
         *,
         page_size: int = 256,
+        max_chunks: int | None = None,
     ) -> None:
         self._client = client
         self._collection_name = collection_name
         self._page_size = page_size
+        self._max_chunks = max_chunks
 
     async def read_points(self) -> list[VectorPoint]:
         points: list[VectorPoint] = []
@@ -63,6 +65,18 @@ class QdrantPointReader:
                 return points
 
             offset = next_offset
+
+    async def read_points_for_label(self, label: str | None) -> list[VectorPoint]:
+        normalized_label = self._optional_string(label)
+        if normalized_label is None:
+            return []
+
+        points = await self.read_points()
+        filtered_points = [point for point in points if point.label == normalized_label]
+        if self._max_chunks is None:
+            return filtered_points
+
+        return filtered_points[: self._max_chunks]
 
     @staticmethod
     def _normalize_record(record: Any) -> VectorPoint | None:
