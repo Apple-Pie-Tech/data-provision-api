@@ -1,6 +1,6 @@
-from typing import Literal
+from typing import Annotated, Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, StringConstraints
 
 
 PodcastStatus = Literal["pending", "running", "completed", "failed"]
@@ -9,7 +9,7 @@ PodcastStatus = Literal["pending", "running", "completed", "failed"]
 class PodcastCreateRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    label: str
+    label: Annotated[str, StringConstraints(strip_whitespace=True, min_length=1)]
 
 
 class PodcastScriptLine(BaseModel):
