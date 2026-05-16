@@ -1,4 +1,4 @@
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Iterator
 from dataclasses import dataclass
 
 from fastapi import BackgroundTasks, Depends, FastAPI, HTTPException
@@ -67,31 +67,10 @@ class PodcastGenerationDependencies:
     audio_merger: AudioMerger | None
 
 
-@app.get("/health")
-async def health() -> dict[str, str]:
-    return {"status": "ok"}
-
-
-async def get_point_reader(
-    settings: Settings = Depends(get_settings),
-) -> AsyncIterator[QdrantPointReader]:
-    client = AsyncQdrantClient(
-        url=settings.qdrant_url,
-        api_key=settings.qdrant_api_key,
-    )
-    try:
-        yield QdrantPointReader(client, settings.qdrant_collection)
-    finally:
-        await client.close()
-
-
-def get_podcast_repository() -> PodcastRepository:
-    return PodcastRepository()
-
-
-def get_podcast_generation_dependencies(
-    settings: Settings = Depends(get_settings),
-    point_reader: SupportsPointReader = Depends(get_point_reader),
+def build_podcast_generation_dependencies(
+    *,
+    settings: Settings,
+    point_reader: SupportsPointReader,
 ) -> PodcastGenerationDependencies:
     try:
         cover_generator: SupportsCoverGenerator | None = FalCoverGenerator(
@@ -121,6 +100,37 @@ def get_podcast_generation_dependencies(
     )
 
 
+@app.get("/health")
+async def health() -> dict[str, str]:
+    return {"status": "ok"}
+
+
+async def get_point_reader(
+    settings: Settings = Depends(get_settings),
+) -> AsyncIterator[QdrantPointReader]:
+    client = AsyncQdrantClient(
+        url=settings.qdrant_url,
+        api_key=settings.qdrant_api_key,
+    )
+    try:
+        yield QdrantPointReader(client, settings.qdrant_collection)
+    finally:
+        await client.close()
+
+
+def get_podcast_repository() -> Iterator[PodcastRepository]:
+    repository = PodcastRepository()
+    try:
+        repository.init_db()
+        yield repository
+    finally:
+        repository.close()
+
+
+def get_podcast_generation_dependencies() -> PodcastGenerationDependencies | None:
+    return None
+
+
 async def run_podcast_generation(
     podcast_id: str,
     repository: PodcastRepository,
@@ -142,6 +152,30 @@ async def run_podcast_generation(
     )
 
 
+async def run_podcast_generation_from_settings(
+    podcast_id: str,
+    settings: Settings,
+) -> None:
+    repository: PodcastRepository | None = None
+    client = AsyncQdrantClient(
+        url=settings.qdrant_url,
+        api_key=settings.qdrant_api_key,
+    )
+    try:
+        repository = PodcastRepository()
+        repository.init_db()
+        point_reader = QdrantPointReader(client, settings.qdrant_collection)
+        generation = build_podcast_generation_dependencies(
+            settings=settings,
+            point_reader=point_reader,
+        )
+        await run_podcast_generation(podcast_id, repository, generation, settings)
+    finally:
+        if repository is not None:
+            repository.close()
+        await client.close()
+
+
 @app.get("/universe", response_model=UniverseResponse)
 async def get_universe(
     point_reader: QdrantPointReader = Depends(get_point_reader),
@@ -153,22 +187,29 @@ async def get_universe(
     return assemble_universe_graph(points)
 
 
-@app.post("/podcasts", response_model=PodcastDetail, status_code=201)
+@app.post("/podcasts", response_model=PodcastDetail, status_code=202)
 async def create_podcast(
     payload: PodcastCreateRequest,
     background_tasks: BackgroundTasks,
     repository: PodcastRepository = Depends(get_podcast_repository),
-    generation: PodcastGenerationDependencies = Depends(get_podcast_generation_dependencies),
+    generation: PodcastGenerationDependencies | None = Depends(get_podcast_generation_dependencies),
     settings: Settings = Depends(get_settings),
 ) -> PodcastDetail:
     podcast = repository.create(payload.label)
-    background_tasks.add_task(
-        run_podcast_generation,
-        podcast.id,
-        repository,
-        generation,
-        settings,
-    )
+    if generation is None:
+        background_tasks.add_task(
+            run_podcast_generation_from_settings,
+            podcast.id,
+            settings,
+        )
+    else:
+        background_tasks.add_task(
+            run_podcast_generation,
+            podcast.id,
+            repository,
+            generation,
+            settings,
+        )
     return podcast
 
 
@@ -194,9 +235,11 @@ __all__ = [
     "PodcastGenerationDependencies",
     "Settings",
     "app",
+    "build_podcast_generation_dependencies",
     "get_point_reader",
     "get_podcast_generation_dependencies",
     "get_podcast_repository",
     "get_settings",
     "run_podcast_generation",
+    "run_podcast_generation_from_settings",
 ]
