@@ -17,6 +17,7 @@ dependencies = [
   "pydantic-settings>=2.7",
   "psycopg[binary]>=3.2",
   "qdrant-client>=1.11",
+  "uvicorn[standard]>=0.30",
 ]
 
 [project.optional-dependencies]
