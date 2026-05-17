@@ -1,6 +1,7 @@
 from fastapi.testclient import TestClient
 
-from app.main import app, get_point_reader
+from app.main import app, create_app, get_point_reader
+from app.config import Settings
 from app.universe import assemble_universe_graph  # pyright: ignore[reportMissingImports]
 from app.vector_store import VectorPoint  # pyright: ignore[reportMissingImports]
 
@@ -34,16 +35,6 @@ def _clear_overrides() -> None:
     app.dependency_overrides.clear()
 
 
-def _assert_no_title_fields(value: object) -> None:
-    if isinstance(value, dict):
-        assert "title" not in value
-        for nested_value in value.values():
-            _assert_no_title_fields(nested_value)
-    elif isinstance(value, list):
-        for item in value:
-            _assert_no_title_fields(item)
-
-
 def test_health_endpoint() -> None:
     client = TestClient(app)
 
@@ -51,6 +42,23 @@ def test_health_endpoint() -> None:
 
     assert response.status_code == 200
     assert response.json() == {"status": "ok"}
+
+
+def test_universe_preflight_returns_cors_headers_for_allowed_origin() -> None:
+    cors_app = create_app(Settings(cors_allow_origins="http://127.0.0.1:8081"))
+    cors_client = TestClient(cors_app)
+
+    response = cors_client.options(
+        "/universe",
+        headers={
+            "Origin": "http://127.0.0.1:8081",
+            "Access-Control-Request-Method": "GET",
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.headers["access-control-allow-origin"] == "http://127.0.0.1:8081"
+    assert "GET" in response.headers["access-control-allow-methods"]
 
 
 def test_universe_endpoint_returns_revised_response_for_populated_universe() -> None:
@@ -103,7 +111,11 @@ def test_universe_endpoint_returns_503_when_vector_store_is_unavailable() -> Non
         _clear_overrides()
 
 
-def test_openapi_schema_does_not_include_title_fields() -> None:
+def test_openapi_schema_includes_required_top_level_metadata() -> None:
     schema = app.openapi()
 
-    _assert_no_title_fields(schema)
+    assert schema["info"]["title"] == "Data Provision API"
+    assert schema["info"]["version"] == "0.1.0"
+    assert "/health" in schema["paths"]
+    assert "/universe" in schema["paths"]
+    assert "/podcasts" in schema["paths"]

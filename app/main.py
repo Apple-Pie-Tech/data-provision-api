@@ -2,7 +2,7 @@ from collections.abc import AsyncIterator, Iterator
 from dataclasses import dataclass
 
 from fastapi import BackgroundTasks, Depends, FastAPI, HTTPException
-from fastapi.openapi.utils import get_openapi
+from fastapi.middleware.cors import CORSMiddleware
 from qdrant_client import AsyncQdrantClient
 
 from app.config import Settings, get_settings
@@ -31,30 +31,29 @@ from app.schemas import UniverseResponse  # pyright: ignore[reportMissingImports
 from app.universe import assemble_universe_graph  # pyright: ignore[reportMissingImports]
 from app.vector_store import QdrantPointReader  # pyright: ignore[reportMissingImports]
 
-app = FastAPI(title="Data Provision API", version="0.1.0")
+
+def _parse_cors_allow_origins(raw_value: str) -> list[str]:
+    return [origin for origin in (item.strip() for item in raw_value.split(",")) if origin]
 
 
-def _strip_title_keys(value: object) -> None:
-    if isinstance(value, dict):
-        value.pop("title", None)
-        for nested_value in value.values():
-            _strip_title_keys(nested_value)
-    elif isinstance(value, list):
-        for item in value:
-            _strip_title_keys(item)
+def create_app(settings: Settings | None = None) -> FastAPI:
+    resolved_settings = settings or get_settings()
+    application = FastAPI(title="Data Provision API", version="0.1.0")
+
+    cors_allow_origins = _parse_cors_allow_origins(resolved_settings.cors_allow_origins)
+    if cors_allow_origins:
+        application.add_middleware(
+            CORSMiddleware,
+            allow_credentials=False,
+            allow_headers=["*"],
+            allow_methods=["GET", "POST", "OPTIONS"],
+            allow_origins=cors_allow_origins,
+        )
+
+    return application
 
 
-def custom_openapi() -> dict[str, object]:
-    if app.openapi_schema is not None:
-        return app.openapi_schema
-
-    schema = get_openapi(title=app.title, version=app.version, routes=app.routes)
-    _strip_title_keys(schema)
-    app.openapi_schema = schema
-    return schema
-
-
-app.openapi = custom_openapi
+app = create_app()
 
 
 @dataclass(slots=True)
