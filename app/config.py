@@ -46,9 +46,12 @@ class Settings(BaseSettings):
     podcast_max_script_parts: int = Field(default=12, ge=1)
     podcast_timeout_seconds: int = Field(default=120, ge=1)
 
-    qdrant_url: str = "http://qdrant:6333"
-    qdrant_api_key: str | None = None
-    qdrant_collection: str = "apple_pie_story_chunks"
+    # S3 Vectors bucket and index, created by Terraform and shared with
+    # data-ingestion (writer) and story-labeling-api (labeller). This service
+    # only ever reads from it.
+    s3_vector_bucket: str | None = None
+    s3_vector_index: str = "apple-pie-story-chunks"
+    vector_list_batch_size: int = 500
 
 
 @lru_cache(maxsize=1)

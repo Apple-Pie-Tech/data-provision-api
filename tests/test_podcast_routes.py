@@ -374,20 +374,12 @@ def test_create_podcast_bootstraps_and_closes_separate_request_and_background_re
         def close(self) -> None:
             calls.append(f"{self.name}.close")
 
-    class FakeAsyncQdrantClient:
-        def __init__(self, *, url: str, api_key: str | None = None) -> None:
-            calls.append(f"qdrant.__init__:{url}:{api_key}")
-
-        async def close(self) -> None:
-            calls.append("qdrant.close")
-
-    def fake_point_reader(client: FakeAsyncQdrantClient, collection: str) -> str:
-        calls.append(f"point_reader:{collection}")
-        assert client is not None
+    def fake_point_reader(settings: Settings) -> str:
+        calls.append(f"point_reader:{settings.s3_vector_index}")
         return "point-reader"
 
     def fake_build_generation(*, settings: Settings, point_reader: str) -> str:
-        calls.append(f"build_generation:{point_reader}:{settings.qdrant_collection}")
+        calls.append(f"build_generation:{point_reader}:{settings.s3_vector_index}")
         return "generation-deps"
 
     async def fake_run_generation(
@@ -402,16 +394,14 @@ def test_create_podcast_bootstraps_and_closes_separate_request_and_background_re
         captured["settings"] = settings
 
     monkeypatch.setattr("app.main.PodcastRepository", TrackingRepository)
-    monkeypatch.setattr("app.main.AsyncQdrantClient", FakeAsyncQdrantClient)
-    monkeypatch.setattr("app.main.QdrantPointReader", fake_point_reader)
+    monkeypatch.setattr("app.main.build_point_reader", fake_point_reader)
     monkeypatch.setattr("app.main.build_podcast_generation_dependencies", fake_build_generation)
     monkeypatch.setattr("app.main.run_podcast_generation", fake_run_generation)
 
     app.dependency_overrides[get_settings] = lambda: Settings(
         database_url="postgresql://placeholder",
-        qdrant_url="http://qdrant:6333",
-        qdrant_api_key="",
-        qdrant_collection="data_provision_points",
+        s3_vector_bucket="applepie-vectors",
+        s3_vector_index="data_provision_points",
     )
     client = TestClient(app)
 
@@ -438,20 +428,20 @@ def test_create_podcast_bootstraps_and_closes_separate_request_and_background_re
             label="product-updates",
             status="pending",
         )
-        assert calls[:3] == [
+        # The background task owns its own repository and closes it, and the
+        # request's repository is closed last. There is no vector-client
+        # teardown step any more: botocore holds a connection pool, not an
+        # event-loop bound session like the async Qdrant client did.
+        assert calls == [
             "repository-1.__init__",
             "repository-1.init_db",
             "repository-1.create:product-updates",
-        ]
-        assert "qdrant.__init__:http://qdrant:6333:" in calls[3]
-        assert calls[4:] == [
             "repository-2.__init__",
             "repository-2.init_db",
             "point_reader:data_provision_points",
             "build_generation:point-reader:data_provision_points",
             "run_generation:podcast-real",
             "repository-2.close",
-            "qdrant.close",
             "repository-1.close",
         ]
     finally:
@@ -489,18 +479,11 @@ async def test_background_generation_records_a_dependency_construction_failure(
         def close(self) -> None:
             self.closed = True
 
-    class FakeAsyncQdrantClient:
-        def __init__(self, *, url: str, api_key: str | None = None) -> None:
-            self.closed = False
-
-        async def close(self) -> None:
-            self.closed = True
-
     def exploding_build(*, settings: Settings, point_reader: object) -> object:
         raise RuntimeError("Missing credentials")
 
     monkeypatch.setattr("app.main.PodcastRepository", TrackingRepository)
-    monkeypatch.setattr("app.main.AsyncQdrantClient", FakeAsyncQdrantClient)
+    monkeypatch.setattr("app.main.build_point_reader", lambda settings: "point-reader")
     monkeypatch.setattr("app.main.build_podcast_generation_dependencies", exploding_build)
 
     await run_podcast_generation_from_settings(

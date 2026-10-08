@@ -52,7 +52,7 @@ def test_env_example_uses_placeholders_and_no_real_secrets() -> None:
     expected_blank_keys = {
         "DATABASE_URL",
         "FAL_KEY",
-        "QDRANT_API_KEY",
+        "S3_VECTOR_BUCKET",
     }
 
     for key in expected_blank_keys:
@@ -74,8 +74,7 @@ def test_env_example_uses_placeholders_and_no_real_secrets() -> None:
     assert not any(key.startswith("AZURE_") for key in assignments)
     assert assignments["S3_PODCAST_BUCKET"] == "applepie-podcasts"
     assert assignments["PRESIGNED_URL_TTL_MINUTES"] == "60"
-    assert assignments["QDRANT_URL"] == "http://qdrant:6333"
-    assert assignments["QDRANT_COLLECTION"] == "apple_pie_story_chunks"
+    assert assignments["S3_VECTOR_INDEX"] == "apple-pie-story-chunks"
 
     forbidden_secret_markers = (
         "DefaultEndpointsProtocol=",

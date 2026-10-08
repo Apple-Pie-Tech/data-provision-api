@@ -15,7 +15,6 @@ dependencies = [
   "pydub>=0.25",
   "pydantic-settings>=2.7",
   "psycopg[binary]>=3.2",
-  "qdrant-client>=1.11",
   "uvicorn[standard]>=0.30",
 ]
 

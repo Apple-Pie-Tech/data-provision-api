@@ -1,23 +1,18 @@
-from collections.abc import AsyncIterator, Iterator
+from collections.abc import Iterator
 from dataclasses import dataclass
 
+import boto3
 from fastapi import BackgroundTasks, Depends, FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from qdrant_client import AsyncQdrantClient
 
-from app.url_signing import (  # pyright: ignore[reportMissingImports]
-    S3PresignedUrlSigner,
-    sign_podcast_urls,
-    sign_universe_audio_urls,
-)
 from app.config import Settings, get_settings
 from app.podcast_clients import (  # pyright: ignore[reportMissingImports]
     DEFAULT_AUDIO_VOICE,
     DEFAULT_HOST_B_VOICE,
-    S3PodcastBlobStore,
     BedrockScriptGenerator,
     FalCoverGenerator,
     PollyTTSClient,
+    S3PodcastBlobStore,
 )
 from app.podcast_generation import (  # pyright: ignore[reportMissingImports]
     AudioMerger,
@@ -36,7 +31,14 @@ from app.podcast_schemas import (  # pyright: ignore[reportMissingImports]
 )
 from app.schemas import UniverseResponse  # pyright: ignore[reportMissingImports]
 from app.universe import assemble_universe_graph  # pyright: ignore[reportMissingImports]
-from app.vector_store import QdrantPointReader  # pyright: ignore[reportMissingImports]
+from app.url_signing import (  # pyright: ignore[reportMissingImports]
+    S3PresignedUrlSigner,
+    sign_podcast_urls,
+    sign_universe_audio_urls,
+)
+from app.vector_store import (  # pyright: ignore[reportMissingImports]
+    S3VectorsPointReader,
+)
 
 
 def _parse_cors_allow_origins(raw_value: str) -> list[str]:
@@ -129,17 +131,25 @@ async def health() -> dict[str, str]:
     return {"status": "ok"}
 
 
-async def get_point_reader(
-    settings: Settings = Depends(get_settings),
-) -> AsyncIterator[QdrantPointReader]:
-    client = AsyncQdrantClient(
-        url=settings.qdrant_url,
-        api_key=settings.qdrant_api_key,
+def build_point_reader(settings: Settings) -> S3VectorsPointReader:
+    return S3VectorsPointReader(
+        boto3.client("s3vectors", region_name=settings.aws_region),
+        settings.s3_vector_bucket or "",
+        settings.s3_vector_index,
+        page_size=settings.vector_list_batch_size,
     )
-    try:
-        yield QdrantPointReader(client, settings.qdrant_collection)
-    finally:
-        await client.close()
+
+
+def get_point_reader(
+    settings: Settings = Depends(get_settings),
+) -> S3VectorsPointReader:
+    """Build a reader for this request.
+
+    No teardown: botocore holds a connection pool rather than an event-loop
+    bound session, so there is nothing to await closed the way the async Qdrant
+    client needed.
+    """
+    return build_point_reader(settings)
 
 
 def get_podcast_repository() -> Iterator[PodcastRepository]:
@@ -188,14 +198,10 @@ async def run_podcast_generation_from_settings(
     settings: Settings,
 ) -> None:
     repository: PodcastRepository | None = None
-    client = AsyncQdrantClient(
-        url=settings.qdrant_url,
-        api_key=settings.qdrant_api_key,
-    )
     try:
         repository = PodcastRepository()
         repository.init_db()
-        point_reader = QdrantPointReader(client, settings.qdrant_collection)
+        point_reader = build_point_reader(settings)
         generation = build_podcast_generation_dependencies(
             settings=settings,
             point_reader=point_reader,
@@ -211,12 +217,11 @@ async def run_podcast_generation_from_settings(
     finally:
         if repository is not None:
             repository.close()
-        await client.close()
 
 
 @app.get("/universe", response_model=UniverseResponse)
 async def get_universe(
-    point_reader: QdrantPointReader = Depends(get_point_reader),
+    point_reader: S3VectorsPointReader = Depends(get_point_reader),
     signer: S3PresignedUrlSigner = Depends(get_url_signer),
 ) -> UniverseResponse:
     try:
