@@ -107,7 +107,7 @@ class FakeBlobStore:
 
     def upload_audio(self, *, podcast_id: str, audio: bytes) -> str:
         self.uploaded_audio.append((podcast_id, audio))
-        return f"https://blob.example.com/podcasts/{podcast_id}/podcast.mp3"
+        return f"https://blob.example.com/podcasts/{podcast_id}/podcast.wav"
 
     def upload_cover(self, *, podcast_id: str, cover: bytes) -> str:
         self.uploaded_covers.append((podcast_id, cover))
@@ -202,7 +202,7 @@ async def test_generate_podcast_happy_path() -> None:
             PodcastScriptLine(speaker="host_b", text="Discussion"),
         ]
     )
-    assert result.podcast.audio_url == "https://blob.example.com/podcasts/podcast-1/podcast.mp3"
+    assert result.podcast.audio_url == "https://blob.example.com/podcasts/podcast-1/podcast.wav"
     assert result.podcast.cover_url == "https://blob.example.com/podcasts/podcast-1/cover.png"
     assert repository.transitions == [
         (created.id, "pending"),

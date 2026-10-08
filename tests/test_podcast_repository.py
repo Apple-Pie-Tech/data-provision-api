@@ -214,6 +214,20 @@ def test_podcast_repository_marks_failed() -> None:
     assert repository.get_by_id(created.id) == failed
 
 
+def test_podcast_repository_marks_failed_before_the_job_ever_started() -> None:
+    """A job that dies while wiring its dependencies must not stay pending (E35)."""
+
+    connection = FakeConnection()
+    repository = PodcastRepository(connection)
+
+    created = repository.create("episode-setup-failure")
+
+    failed = repository.mark_failed(created.id, error="missing OpenAI credentials")
+
+    assert failed.status == "failed"
+    assert failed.error == "missing OpenAI credentials"
+
+
 def test_podcast_repository_enforces_state_machine() -> None:
     connection = FakeConnection()
     repository = PodcastRepository(connection)

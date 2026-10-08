@@ -5,12 +5,19 @@ from fastapi import BackgroundTasks, Depends, FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from qdrant_client import AsyncQdrantClient
 
+from app.blob_signing import (  # pyright: ignore[reportMissingImports]
+    BlobSasUrlSigner,
+    sign_podcast_urls,
+    sign_universe_audio_urls,
+)
 from app.config import Settings, get_settings
 from app.podcast_clients import (  # pyright: ignore[reportMissingImports]
+    DEFAULT_AUDIO_VOICE,
+    DEFAULT_HOST_B_VOICE,
     AzurePodcastBlobStore,
+    BedrockScriptGenerator,
     FalCoverGenerator,
-    OpenAIScriptGenerator,
-    SlngTTSClient,
+    PollyTTSClient,
 )
 from app.podcast_generation import (  # pyright: ignore[reportMissingImports]
     AudioMerger,
@@ -73,21 +80,30 @@ def build_podcast_generation_dependencies(
 ) -> PodcastGenerationDependencies:
     try:
         cover_generator: SupportsCoverGenerator | None = FalCoverGenerator(
-            timeout_seconds=settings.podcast_timeout_seconds
+            api_key=settings.fal_key,
+            timeout_seconds=settings.podcast_timeout_seconds,
         )
     except Exception:
         cover_generator = None
 
     return PodcastGenerationDependencies(
         point_reader=point_reader,
-        script_generator=OpenAIScriptGenerator(
-            model="gpt-4o-mini",
+        script_generator=BedrockScriptGenerator(
+            region=settings.aws_region,
+            model=settings.bedrock_script_model,
             timeout_seconds=settings.podcast_timeout_seconds,
             max_parts=settings.podcast_max_script_parts,
+            max_tokens=settings.bedrock_script_max_tokens,
         ),
-        tts_client=SlngTTSClient(
-            api_key=settings.slng_api_key,
+        tts_client=PollyTTSClient(
+            region=settings.aws_region,
             timeout_seconds=settings.podcast_timeout_seconds,
+            engine=settings.polly_engine,
+            sample_rate=settings.polly_sample_rate,
+            voice_models={
+                DEFAULT_AUDIO_VOICE: settings.polly_voice_host_a,
+                DEFAULT_HOST_B_VOICE: settings.polly_voice_host_b,
+            },
         ),
         blob_store=AzurePodcastBlobStore(
             connection_string=settings.azure_storage_connection_string,
@@ -97,6 +113,15 @@ def build_podcast_generation_dependencies(
         cover_generator=cover_generator,
         audio_merger=None,
     )
+
+
+def record_bootstrap_failure(
+    repository: PodcastRepository,
+    podcast_id: str,
+    exc: Exception,
+) -> None:
+    error = f"podcast generation could not start: {exc}"[:300]
+    repository.mark_failed(podcast_id, error=error)
 
 
 @app.get("/health")
@@ -128,6 +153,13 @@ def get_podcast_repository() -> Iterator[PodcastRepository]:
 
 def get_podcast_generation_dependencies() -> PodcastGenerationDependencies | None:
     return None
+
+
+def get_blob_url_signer(settings: Settings = Depends(get_settings)) -> BlobSasUrlSigner:
+    return BlobSasUrlSigner(
+        connection_string=settings.azure_storage_connection_string,
+        ttl_minutes=settings.blob_sas_ttl_minutes,
+    )
 
 
 async def run_podcast_generation(
@@ -169,6 +201,13 @@ async def run_podcast_generation_from_settings(
             point_reader=point_reader,
         )
         await run_podcast_generation(podcast_id, repository, generation, settings)
+    except Exception as exc:
+        # Nothing downstream of this background task can report an error, so a
+        # failure while bootstrapping must be written to the row itself —
+        # otherwise it stays pending forever.
+        if repository is None:
+            raise
+        record_bootstrap_failure(repository, podcast_id, exc)
     finally:
         if repository is not None:
             repository.close()
@@ -178,12 +217,13 @@ async def run_podcast_generation_from_settings(
 @app.get("/universe", response_model=UniverseResponse)
 async def get_universe(
     point_reader: QdrantPointReader = Depends(get_point_reader),
+    signer: BlobSasUrlSigner = Depends(get_blob_url_signer),
 ) -> UniverseResponse:
     try:
         points = await point_reader.read_points()
     except Exception as exc:
         raise HTTPException(status_code=503, detail="vector store unavailable") from exc
-    return assemble_universe_graph(points)
+    return sign_universe_audio_urls(assemble_universe_graph(points), signer)
 
 
 @app.post("/podcasts", response_model=PodcastDetail, status_code=202)
@@ -215,19 +255,21 @@ async def create_podcast(
 @app.get("/podcasts", response_model=list[PodcastListItem])
 async def list_podcasts(
     repository: PodcastRepository = Depends(get_podcast_repository),
+    signer: BlobSasUrlSigner = Depends(get_blob_url_signer),
 ) -> list[PodcastListItem]:
-    return repository.list()
+    return [sign_podcast_urls(podcast, signer) for podcast in repository.list()]
 
 
 @app.get("/podcasts/{podcast_id}", response_model=PodcastDetail)
 async def get_podcast(
     podcast_id: str,
     repository: PodcastRepository = Depends(get_podcast_repository),
+    signer: BlobSasUrlSigner = Depends(get_blob_url_signer),
 ) -> PodcastDetail:
     podcast = repository.get_by_id(podcast_id)
     if podcast is None:
         raise HTTPException(status_code=404, detail="podcast not found")
-    return podcast
+    return sign_podcast_urls(podcast, signer)
 
 
 __all__ = [
@@ -235,10 +277,12 @@ __all__ = [
     "Settings",
     "app",
     "build_podcast_generation_dependencies",
+    "get_blob_url_signer",
     "get_point_reader",
     "get_podcast_generation_dependencies",
     "get_podcast_repository",
     "get_settings",
+    "record_bootstrap_failure",
     "run_podcast_generation",
     "run_podcast_generation_from_settings",
 ]

@@ -72,7 +72,9 @@ Enable the UI to request a podcast for a topic and later fetch generated podcast
 - DB table columns: `id`, `label`, `status`, `script_json`, `audio_url`, `cover_url`, `error`, `created_at`, `updated_at`, `started_at`, `completed_at`.
 - Config fields: `DATABASE_URL`, `OPENAI_API_KEY`, `SLNG_API_KEY`, `FAL_KEY`, `AZURE_STORAGE_ACCOUNT`, `AZURE_STORAGE_CONTAINER`, `AZURE_STORAGE_CONNECTION_STRING`, max chunks, max script parts, timeout seconds.
 - Default blob container name: `podcasts`.
-- Blob path scheme: `podcasts/{podcast_id}/podcast.mp3` and `podcasts/{podcast_id}/cover.png`.
+- Blob path scheme, inside the `podcasts` container: `{podcast_id}/podcast.wav` and
+  `{podcast_id}/cover.<ext>`, where the cover extension and content type are sniffed
+  from the generated image bytes (jpg/png/gif/webp).
 - Hard generation limits: default max 40 chunks, max 12 script parts/clips, max 120 seconds per whole job unless executor chooses lower.
 
 ### Must NOT Have

@@ -1,7 +1,8 @@
 """Audio helpers for podcast generation.
 
-Requires `ffmpeg` to be installed and available on `PATH` so pydub can decode
-and export MP3 files.
+PollyTTSClient wraps Polly's headerless PCM into WAV, so clips are decoded
+and re-exported as WAV. pydub reads and writes WAV through the standard library,
+so `ffmpeg` is only needed if another codec is ever introduced.
 """
 
 from __future__ import annotations
@@ -20,10 +21,10 @@ def merge_audio_clips(clips: Sequence[bytes]) -> bytes:
     for clip in clips:
         if not clip:
             raise ValueError("audio clip was empty")
-        merged += AudioSegment.from_file(BytesIO(clip), format="mp3")
+        merged += AudioSegment.from_file(BytesIO(clip), format="wav")
 
     output = BytesIO()
-    merged.export(output, format="mp3")
+    merged.export(output, format="wav")
     return output.getvalue()
 
 

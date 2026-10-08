@@ -11,9 +11,9 @@ def _assert_no_secret_fields(value: object) -> None:
     secret_field_names = {
         "database_url",
         "openai_api_key",
+        "openai_base_url",
         "slng_api_key",
         "fal_key",
-        "azure_storage_account",
         "azure_storage_container",
         "azure_storage_connection_string",
     }

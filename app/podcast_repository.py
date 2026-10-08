@@ -104,7 +104,9 @@ class PodcastRepository:
         return self._to_detail(row)
 
     def mark_failed(self, podcast_id: str, *, error: str) -> PodcastDetail:
-        self._require_status(podcast_id, RUNNING)
+        # A job can die before it ever starts — e.g. while building its
+        # dependencies — so PENDING is a legitimate source state here.
+        self._require_status_in(podcast_id, {PENDING, RUNNING})
         row = self._write_and_return_one(
             """
             UPDATE podcasts
@@ -148,11 +150,15 @@ class PodcastRepository:
         return self._to_detail(row)
 
     def _require_status(self, podcast_id: str, expected_status: str) -> None:
+        self._require_status_in(podcast_id, {expected_status})
+
+    def _require_status_in(self, podcast_id: str, expected_statuses: set[str]) -> None:
         current = self.get_by_id(podcast_id)
         if current is None:
             raise KeyError(podcast_id)
-        if current.status != expected_status:
-            raise ValueError(f"podcast {podcast_id} must be {expected_status} before this transition")
+        if current.status not in expected_statuses:
+            expected = " or ".join(sorted(expected_statuses))
+            raise ValueError(f"podcast {podcast_id} must be {expected} before this transition")
 
     def _write_and_return_one(self, query: str, params: tuple[Any, ...]) -> Mapping[str, Any]:
         try:

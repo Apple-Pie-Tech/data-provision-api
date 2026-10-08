@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import base64
 from dataclasses import dataclass
+from urllib.parse import parse_qs, urlsplit
 
 import pytest
 from fastapi.testclient import TestClient
@@ -66,7 +68,7 @@ class FakeBlobStore:
 
     def upload_audio(self, *, podcast_id: str, audio: bytes) -> str:
         self.uploaded_audio.append((podcast_id, audio))
-        return f"https://blob.example.com/podcasts/{podcast_id}/podcast.mp3"
+        return f"https://blob.example.com/podcasts/{podcast_id}/podcast.wav"
 
     def upload_cover(self, *, podcast_id: str, cover: bytes) -> str:
         self.uploaded_covers.append((podcast_id, cover))
@@ -241,7 +243,7 @@ def test_create_list_and_detail_podcast_routes_use_background_generation() -> No
 
         assert first_detail is not None
         assert first_detail.status == "completed"
-        assert first_detail.audio_url == f"https://blob.example.com/podcasts/{first_id}/podcast.mp3"
+        assert first_detail.audio_url == f"https://blob.example.com/podcasts/{first_id}/podcast.wav"
         assert first_detail.cover_url == f"https://blob.example.com/podcasts/{first_id}/cover.png"
 
         assert second_detail is not None
@@ -451,5 +453,140 @@ def test_create_podcast_bootstraps_and_closes_separate_request_and_background_re
             "qdrant.close",
             "repository-1.close",
         ]
+    finally:
+        _clear_overrides()
+
+
+@pytest.mark.asyncio
+async def test_background_generation_records_a_dependency_construction_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """E35: a crash while wiring dependencies must not strand the row at pending."""
+
+    from app.main import run_podcast_generation_from_settings
+
+    rows: dict[str, PodcastDetail] = {
+        "podcast-1": PodcastDetail(id="podcast-1", label="product-updates", status="pending")
+    }
+
+    class TrackingRepository:
+        def __init__(self) -> None:
+            self.closed = False
+
+        def init_db(self) -> None:
+            return None
+
+        def get_by_id(self, podcast_id: str) -> PodcastDetail | None:
+            return rows.get(podcast_id)
+
+        def mark_failed(self, podcast_id: str, *, error: str) -> PodcastDetail:
+            rows[podcast_id] = rows[podcast_id].model_copy(
+                update={"status": "failed", "error": error}
+            )
+            return rows[podcast_id]
+
+        def close(self) -> None:
+            self.closed = True
+
+    class FakeAsyncQdrantClient:
+        def __init__(self, *, url: str, api_key: str | None = None) -> None:
+            self.closed = False
+
+        async def close(self) -> None:
+            self.closed = True
+
+    def exploding_build(*, settings: Settings, point_reader: object) -> object:
+        raise RuntimeError("Missing credentials")
+
+    monkeypatch.setattr("app.main.PodcastRepository", TrackingRepository)
+    monkeypatch.setattr("app.main.AsyncQdrantClient", FakeAsyncQdrantClient)
+    monkeypatch.setattr("app.main.build_podcast_generation_dependencies", exploding_build)
+
+    await run_podcast_generation_from_settings(
+        "podcast-1",
+        Settings(database_url="postgresql://placeholder"),
+    )
+
+    assert rows["podcast-1"].status == "failed"
+    assert rows["podcast-1"].error
+
+
+# Not a credential: a syntactically valid base64 string so the signer can run its HMAC.
+SIGNING_CONNECTION_STRING = (
+    "DefaultEndpointsProtocol=https;AccountName=applepiestories;"
+    "AccountKey=" + base64.b64encode(b"data-provision-api-route-test").decode() + ";"
+    "EndpointSuffix=core.windows.net"
+)
+STORED_AUDIO_URL = (
+    "https://applepiestories.blob.core.windows.net/podcasts/podcast-1/podcast.wav"
+)
+STORED_COVER_URL = (
+    "https://applepiestories.blob.core.windows.net/podcasts/podcast-1/cover.jpg"
+)
+
+
+def _override_signing_settings() -> None:
+    app.dependency_overrides[get_settings] = lambda: Settings(
+        database_url="postgresql://placeholder",
+        azure_storage_connection_string=SIGNING_CONNECTION_STRING,
+    )
+
+
+def test_podcast_read_routes_sign_stored_blob_urls() -> None:
+    """E52: the row keeps the bare blob URL; the response carries a short-lived SAS."""
+
+    repository = FakePodcastRepository()
+    created = repository.create("product-updates")
+    repository.rows[created.id] = created.model_copy(
+        update={
+            "status": "completed",
+            "audio_url": STORED_AUDIO_URL,
+            "cover_url": STORED_COVER_URL,
+        }
+    )
+    _override_repository(repository)
+    _override_signing_settings()
+    client = TestClient(app)
+
+    try:
+        detail = client.get(f"/podcasts/{created.id}").json()
+        listed = client.get("/podcasts").json()[0]
+
+        for payload in (detail, listed):
+            assert payload["audio_url"].startswith(f"{STORED_AUDIO_URL}?")
+            assert payload["cover_url"].startswith(f"{STORED_COVER_URL}?")
+            assert "sig=" in payload["audio_url"]
+            assert parse_qs(urlsplit(payload["audio_url"]).query)["sp"] == ["r"]
+
+        # The stored row must never gain a token: it would expire in place.
+        assert repository.rows[created.id].audio_url == STORED_AUDIO_URL
+    finally:
+        _clear_overrides()
+
+
+def test_universe_route_signs_point_audio_urls() -> None:
+    """E52: /universe surfaces blob URLs written by data-ingestion; sign those too."""
+
+    stored_audio = (
+        "https://applepiestories.blob.core.windows.net/ingest-audio/audio/in-1/source.wav"
+    )
+    reader = FakePointReader(
+        {
+            "Alpha": [
+                VectorPoint(id="alpha-central", label="Alpha", is_central=True, audio_url=stored_audio),
+                VectorPoint(id="alpha-text", label="Alpha"),
+            ]
+        }
+    )
+    _override_point_reader(reader)
+    _override_signing_settings()
+    client = TestClient(app)
+
+    try:
+        points = {point["id"]: point for point in client.get("/universe").json()["points"]}
+
+        assert points["alpha-central"]["audio_url"].startswith(f"{stored_audio}?")
+        assert "sig=" in points["alpha-central"]["audio_url"]
+        assert points["alpha-text"]["audio_url"] is None
     finally:
         _clear_overrides()

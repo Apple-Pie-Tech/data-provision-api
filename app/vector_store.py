@@ -80,25 +80,48 @@ class QdrantPointReader:
 
     @staticmethod
     def _normalize_record(record: Any) -> VectorPoint | None:
-        payload = getattr(record, "payload", None) or {}
-        raw_label = payload.get("label")
-        if raw_label is None:
+        payload = getattr(record, "payload", None)
+        if not isinstance(payload, dict):
             return None
 
-        label = str(raw_label).strip()
-        if not label:
+        label = QdrantPointReader._extract_label(payload)
+        if label is None:
+            # A chunk that story-labeling has not clustered yet. That is the
+            # normal state before the first labeling run, so it is skipped
+            # rather than treated as an error.
             return None
+
+        is_central = bool(payload.get("is_centroid", False))
 
         return VectorPoint(
             id=str(getattr(record, "id")),
             label=label,
             audio_url=QdrantPointReader._optional_string(payload.get("audio_url")),
-            is_synthetic=bool(payload.get("is_synthetic", False)),
-            is_central=bool(payload.get("is_central", False)),
+            # Nothing writes `is_synthetic`; the centroid points are the
+            # synthetic ones, so `is_centroid` is what the flag was reaching for.
+            is_synthetic=bool(payload.get("is_synthetic", is_central)),
+            is_central=is_central,
             text=payload.get("text"),
             timestamp=payload.get("timestamp"),
             user_id=payload.get("user_id"),
         )
+
+    @staticmethod
+    def _extract_label(payload: dict[str, Any]) -> str | None:
+        """Read the cluster theme from either shape story-labeling writes.
+
+        Ordinary story points get the theme merged in nested under
+        `clustering`; synthetic centroid points carry the same keys at the top
+        level. A reader that checks only one place silently drops the other.
+        """
+
+        clustering = payload.get("clustering")
+        if isinstance(clustering, dict):
+            label = QdrantPointReader._optional_string(clustering.get("theme"))
+            if label is not None:
+                return label
+
+        return QdrantPointReader._optional_string(payload.get("theme"))
 
     @staticmethod
     def _optional_string(value: Any) -> str | None:

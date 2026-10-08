@@ -40,7 +40,6 @@ def test_env_example_documents_azure_setup_and_runtime_caveats() -> None:
         "DATABASE_URL=postgresql://<user>:<password>@<server>.postgres.database.azure.com:5432/<database>?sslmode=require"
         in content
     )
-    assert "az storage container create --account-name applepieingestaudio --name podcasts --auth-mode login" in content
     assert "Background podcast jobs are best-effort only." in content
     assert "not durable across restarts" in content
 
@@ -52,8 +51,6 @@ def test_env_example_uses_placeholders_and_no_real_secrets() -> None:
 
     expected_blank_keys = {
         "DATABASE_URL",
-        "OPENAI_API_KEY",
-        "SLNG_API_KEY",
         "FAL_KEY",
         "AZURE_STORAGE_CONNECTION_STRING",
         "QDRANT_API_KEY",
@@ -63,10 +60,20 @@ def test_env_example_uses_placeholders_and_no_real_secrets() -> None:
         assert key in assignments
         assert assignments[key] == ""
 
-    assert assignments["AZURE_STORAGE_ACCOUNT"] == "applepieingestaudio"
+    # Bedrock and Polly authenticate with the execution role, so there is no key
+    # to document -- and no AWS_SECRET_ACCESS_KEY may ever appear here.
+    assert "AWS_ACCESS_KEY_ID" not in assignments
+    assert "AWS_SECRET_ACCESS_KEY" not in assignments
+    assert assignments["AWS_REGION"] == "us-east-1"
+    assert assignments["BEDROCK_SCRIPT_MODEL"] == "amazon.nova-pro-v1:0"
+    assert assignments["POLLY_ENGINE"] == "generative"
+    assert assignments["POLLY_SAMPLE_RATE"] == "16000"
+    assert assignments["POLLY_VOICE_HOST_A"] == "Ruth"
+    assert assignments["POLLY_VOICE_HOST_B"] == "Matthew"
+    assert "AZURE_STORAGE_ACCOUNT" not in assignments
     assert assignments["AZURE_STORAGE_CONTAINER"] == "podcasts"
     assert assignments["QDRANT_URL"] == "http://qdrant:6333"
-    assert assignments["QDRANT_COLLECTION"] == "data_provision_points"
+    assert assignments["QDRANT_COLLECTION"] == "apple_pie_story_chunks"
 
     forbidden_secret_markers = (
         "DefaultEndpointsProtocol=",
@@ -80,3 +87,19 @@ def test_env_example_uses_placeholders_and_no_real_secrets() -> None:
 
     for marker in forbidden_secret_markers:
         assert all(marker not in line for line in env_lines)
+
+
+def test_env_example_documents_every_setting_the_service_reads() -> None:
+    """Catches .env.example drifting behind Settings.
+
+    Without this, renaming a setting leaves the old key documented and the new one
+    undocumented, and the assertions above keep passing against stale content.
+    """
+    from app.config import Settings
+
+    assignments = _parse_env_assignments(ENV_EXAMPLE_PATH.read_text(encoding="utf-8"))
+    missing = sorted(
+        name.upper() for name in Settings.model_fields if name.upper() not in assignments
+    )
+
+    assert missing == []

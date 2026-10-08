@@ -1,6 +1,11 @@
 from fastapi.testclient import TestClient
 
-from app.main import app, create_app, get_point_reader
+from app.main import (
+    app,
+    build_podcast_generation_dependencies,
+    create_app,
+    get_point_reader,
+)
 from app.config import Settings
 from app.universe import assemble_universe_graph  # pyright: ignore[reportMissingImports]
 from app.vector_store import VectorPoint  # pyright: ignore[reportMissingImports]
@@ -23,6 +28,23 @@ class FailingPointReader:
     async def read_points(self) -> list[VectorPoint]:
         self.calls += 1
         raise ConnectionError("qdrant unavailable")
+
+
+class FakeTTSResponse:
+    def __init__(self, content: bytes = b"wav-bytes") -> None:
+        self.content = content
+
+    def raise_for_status(self) -> None:
+        return None
+
+
+class FakeTTSHTTPClient:
+    def __init__(self) -> None:
+        self.calls: list[dict[str, object]] = []
+
+    def post(self, url: str, **kwargs: object) -> FakeTTSResponse:
+        self.calls.append({"url": url, **kwargs})
+        return FakeTTSResponse()
 
 
 def _override_point_reader(points: list[VectorPoint]) -> FakePointReader:
@@ -119,3 +141,88 @@ def test_openapi_schema_includes_required_top_level_metadata() -> None:
     assert "/health" in schema["paths"]
     assert "/universe" in schema["paths"]
     assert "/podcasts" in schema["paths"]
+
+
+def _stub_boto3(monkeypatch) -> dict[str, list[dict[str, object]]]:
+    """Capture boto3 client construction instead of resolving real credentials.
+
+    build_podcast_generation_dependencies now builds bedrock-runtime and polly
+    clients eagerly, and boto3 resolves credentials at construction. Without this
+    these tests would need live AWS credentials to assert pure wiring.
+    """
+    created: dict[str, list[dict[str, object]]] = {}
+
+    def fake_client(service: str, **kwargs: object) -> object:
+        created.setdefault(service, []).append(kwargs)
+        return object()
+
+    monkeypatch.setattr("boto3.client", fake_client)
+    return created
+
+
+def test_build_podcast_generation_dependencies_uses_configured_polly_voices(
+    monkeypatch,
+) -> None:
+    created = _stub_boto3(monkeypatch)
+    settings = Settings(
+        _env_file=None,
+        aws_region="eu-west-1",
+        polly_engine="neural",
+        polly_sample_rate="8000",
+        polly_voice_host_a="local-voice-a",
+        polly_voice_host_b="local-voice-b",
+        azure_storage_connection_string="UseDevelopmentStorage=true",
+    )
+
+    dependencies = build_podcast_generation_dependencies(
+        settings=settings,
+        point_reader=FakePointReader([]),
+    )
+
+    tts = dependencies.tts_client
+    assert tts.voice_models == {"host_a": "local-voice-a", "host_b": "local-voice-b"}
+    assert tts.engine == "neural"
+    assert tts.sample_rate == "8000"
+    assert created["polly"][0]["region_name"] == "eu-west-1"
+
+
+def test_build_podcast_generation_dependencies_threads_bedrock_settings(monkeypatch) -> None:
+    """E14/E35: the model and region come from Settings, not the environment."""
+    created = _stub_boto3(monkeypatch)
+    settings = Settings(
+        _env_file=None,
+        aws_region="eu-west-1",
+        bedrock_script_model="amazon.nova-lite-v1:0",
+        bedrock_script_max_tokens=777,
+        azure_storage_connection_string="UseDevelopmentStorage=true",
+    )
+
+    dependencies = build_podcast_generation_dependencies(
+        settings=settings,
+        point_reader=FakePointReader([]),
+    )
+
+    generator = dependencies.script_generator
+    assert generator.model == "amazon.nova-lite-v1:0"
+    assert generator.max_tokens == 777
+    assert generator.max_parts == settings.podcast_max_script_parts
+    assert created["bedrock-runtime"][0]["region_name"] == "eu-west-1"
+
+
+def test_build_podcast_generation_dependencies_threads_fal_key(monkeypatch) -> None:
+    """fal.ai is the one AI dependency deliberately left outside AWS."""
+    _stub_boto3(monkeypatch)
+    monkeypatch.delenv("FAL_KEY", raising=False)
+    settings = Settings(
+        _env_file=None,
+        fal_key="fal-key-from-settings",
+        azure_storage_connection_string="UseDevelopmentStorage=true",
+    )
+
+    dependencies = build_podcast_generation_dependencies(
+        settings=settings,
+        point_reader=FakePointReader([]),
+    )
+
+    assert dependencies.cover_generator is not None
+    assert dependencies.cover_generator.client.key == "fal-key-from-settings"
