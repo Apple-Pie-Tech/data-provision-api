@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import base64
 from dataclasses import dataclass
 from urllib.parse import parse_qs, urlsplit
 
@@ -14,12 +13,14 @@ from app.main import (
     get_podcast_generation_dependencies,
     get_podcast_repository,
     get_settings,
+    get_url_signer,
 )
 from app.podcast_generation import (  # pyright: ignore[reportMissingImports]
     AudioMerger,
     FALLBACK_COVER_PNG,
 )
 from app.podcast_schemas import PodcastDetail, PodcastScript, PodcastScriptLine
+from app.url_signing import S3PresignedUrlSigner  # pyright: ignore[reportMissingImports]
 from app.universe import assemble_universe_graph  # pyright: ignore[reportMissingImports]
 from app.vector_store import VectorPoint  # pyright: ignore[reportMissingImports]
 
@@ -511,29 +512,38 @@ async def test_background_generation_records_a_dependency_construction_failure(
     assert rows["podcast-1"].error
 
 
-# Not a credential: a syntactically valid base64 string so the signer can run its HMAC.
-SIGNING_CONNECTION_STRING = (
-    "DefaultEndpointsProtocol=https;AccountName=applepiestories;"
-    "AccountKey=" + base64.b64encode(b"data-provision-api-route-test").decode() + ";"
-    "EndpointSuffix=core.windows.net"
-)
 STORED_AUDIO_URL = (
-    "https://applepiestories.blob.core.windows.net/podcasts/podcast-1/podcast.wav"
+    "https://applepie-podcasts.s3.us-east-1.amazonaws.com/podcast-1/podcast.wav"
 )
 STORED_COVER_URL = (
-    "https://applepiestories.blob.core.windows.net/podcasts/podcast-1/cover.jpg"
+    "https://applepie-podcasts.s3.us-east-1.amazonaws.com/podcast-1/cover.jpg"
 )
 
 
-def _override_signing_settings() -> None:
-    app.dependency_overrides[get_settings] = lambda: Settings(
-        database_url="postgresql://placeholder",
-        azure_storage_connection_string=SIGNING_CONNECTION_STRING,
+class _FakeS3:
+    """Presigns by appending a marker, so routes can be asserted without AWS."""
+
+    def generate_presigned_url(self, **kwargs: object) -> str:
+        params = kwargs["Params"]
+        return (
+            f"https://{params['Bucket']}.s3.us-east-1.amazonaws.com/{params['Key']}"
+            f"?X-Amz-Signature=deadbeef&X-Amz-Expires={kwargs['ExpiresIn']}"
+        )
+
+
+def _override_signer() -> None:
+    """Inject the signer rather than letting it resolve real AWS credentials.
+
+    The route contract under test is "every stored URL in the response has been
+    through the signer", which must hold on a machine with no AWS profile.
+    """
+    app.dependency_overrides[get_url_signer] = lambda: S3PresignedUrlSigner(
+        client=_FakeS3()
     )
 
 
 def test_podcast_read_routes_sign_stored_blob_urls() -> None:
-    """E52: the row keeps the bare blob URL; the response carries a short-lived SAS."""
+    """E52: the row keeps the unsigned S3 URL; the response carries a presigned one."""
 
     repository = FakePodcastRepository()
     created = repository.create("product-updates")
@@ -545,7 +555,7 @@ def test_podcast_read_routes_sign_stored_blob_urls() -> None:
         }
     )
     _override_repository(repository)
-    _override_signing_settings()
+    _override_signer()
     client = TestClient(app)
 
     try:
@@ -555,8 +565,9 @@ def test_podcast_read_routes_sign_stored_blob_urls() -> None:
         for payload in (detail, listed):
             assert payload["audio_url"].startswith(f"{STORED_AUDIO_URL}?")
             assert payload["cover_url"].startswith(f"{STORED_COVER_URL}?")
-            assert "sig=" in payload["audio_url"]
-            assert parse_qs(urlsplit(payload["audio_url"]).query)["sp"] == ["r"]
+            query = parse_qs(urlsplit(payload["audio_url"]).query)
+            assert query["X-Amz-Signature"] == ["deadbeef"]
+            assert query["X-Amz-Expires"] == ["3600"]
 
         # The stored row must never gain a token: it would expire in place.
         assert repository.rows[created.id].audio_url == STORED_AUDIO_URL
@@ -565,10 +576,10 @@ def test_podcast_read_routes_sign_stored_blob_urls() -> None:
 
 
 def test_universe_route_signs_point_audio_urls() -> None:
-    """E52: /universe surfaces blob URLs written by data-ingestion; sign those too."""
+    """E52: /universe surfaces S3 URLs written by data-ingestion; sign those too."""
 
     stored_audio = (
-        "https://applepiestories.blob.core.windows.net/ingest-audio/audio/in-1/source.wav"
+        "https://applepie-audio.s3.us-east-1.amazonaws.com/audio/in-1/source.wav"
     )
     reader = FakePointReader(
         {
@@ -579,14 +590,14 @@ def test_universe_route_signs_point_audio_urls() -> None:
         }
     )
     _override_point_reader(reader)
-    _override_signing_settings()
+    _override_signer()
     client = TestClient(app)
 
     try:
         points = {point["id"]: point for point in client.get("/universe").json()["points"]}
 
         assert points["alpha-central"]["audio_url"].startswith(f"{stored_audio}?")
-        assert "sig=" in points["alpha-central"]["audio_url"]
+        assert "X-Amz-Signature=deadbeef" in points["alpha-central"]["audio_url"]
         assert points["alpha-text"]["audio_url"] is None
     finally:
         _clear_overrides()

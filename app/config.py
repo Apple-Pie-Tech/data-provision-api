@@ -3,7 +3,9 @@ from functools import lru_cache
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
-from app.blob_signing import DEFAULT_BLOB_SAS_TTL_MINUTES  # pyright: ignore[reportMissingImports]
+from app.url_signing import (  # pyright: ignore[reportMissingImports]
+    DEFAULT_PRESIGNED_URL_TTL_MINUTES,
+)
 from app.podcast_clients import (  # pyright: ignore[reportMissingImports]
     DEFAULT_AUDIO_VOICE_MODEL,
     DEFAULT_BEDROCK_SCRIPT_MAX_TOKENS,
@@ -11,6 +13,7 @@ from app.podcast_clients import (  # pyright: ignore[reportMissingImports]
     DEFAULT_HOST_B_VOICE_MODEL,
     DEFAULT_POLLY_ENGINE,
     DEFAULT_POLLY_SAMPLE_RATE,
+    DEFAULT_PODCAST_BUCKET,
 )
 
 
@@ -34,10 +37,10 @@ class Settings(BaseSettings):
     polly_voice_host_a: str = DEFAULT_AUDIO_VOICE_MODEL
     polly_voice_host_b: str = DEFAULT_HOST_B_VOICE_MODEL
 
-    azure_storage_container: str = "podcasts"
-    azure_storage_connection_string: str | None = None
-    # Blob containers stay private; read URLs are signed per response (E52).
-    blob_sas_ttl_minutes: int = Field(default=DEFAULT_BLOB_SAS_TTL_MINUTES, ge=1)
+    # Bucket for generated podcast audio and cover art, created by Terraform.
+    s3_podcast_bucket: str = DEFAULT_PODCAST_BUCKET
+    # Objects stay private; read URLs are presigned per response (E52).
+    presigned_url_ttl_minutes: int = Field(default=DEFAULT_PRESIGNED_URL_TTL_MINUTES, ge=1)
 
     podcast_max_chunks: int = Field(default=40, ge=1)
     podcast_max_script_parts: int = Field(default=12, ge=1)

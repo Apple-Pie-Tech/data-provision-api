@@ -6,6 +6,7 @@ import wave
 from dataclasses import dataclass
 from importlib import import_module
 from typing import Any, Protocol
+from urllib.parse import quote
 
 import httpx
 from botocore.exceptions import ConnectTimeoutError, ReadTimeoutError
@@ -30,11 +31,10 @@ DEFAULT_HOST_B_VOICE_MODEL = "Matthew"
 DEFAULT_POLLY_ENGINE = "generative"
 # Polly emits headerless PCM; this is the rate the WAV header is written with.
 DEFAULT_POLLY_SAMPLE_RATE = "16000"
-DEFAULT_BLOB_CONTAINER = "podcasts"
-# The container is already named `podcasts`; repeating it here produced
+DEFAULT_PODCAST_BUCKET = "applepie-podcasts"
+# The bucket is already named for podcasts; repeating it here produced
 # `podcasts/podcasts/<id>/...` in every stored URL (E47).
-DEFAULT_BLOB_PREFIX = ""
-DEFAULT_BLOB_ACCOUNT = "devstoreaccount1"
+DEFAULT_OBJECT_PREFIX = ""
 
 UNKNOWN_IMAGE_CONTENT_TYPE = "application/octet-stream"
 UNKNOWN_IMAGE_EXTENSION = "bin"
@@ -62,53 +62,6 @@ def sniff_image_type(data: bytes) -> tuple[str, str]:
     return UNKNOWN_IMAGE_CONTENT_TYPE, UNKNOWN_IMAGE_EXTENSION
 
 
-def account_credentials_from_connection_string(
-    connection_string: str | None,
-) -> tuple[str | None, str | None]:
-    """Pull `(AccountName, AccountKey)` out of an Azure Storage connection string.
-
-    A connection string that authenticates some other way — a bare SAS, or a
-    future managed-identity setup — yields a `None` key, which callers treat as
-    "cannot sign". The `UseDevelopmentStorage=true` shorthand carries no literal
-    values, so the Azure SDK expands it rather than hardcoding emulator secrets.
-    """
-
-    if not connection_string:
-        return None, None
-
-    values: dict[str, str] = {}
-    for segment in connection_string.split(";"):
-        key, separator, value = segment.partition("=")
-        if separator and value.strip():
-            values[key.strip().lower()] = value.strip()
-
-    account_name = values.get("accountname")
-    account_key = values.get("accountkey")
-    if account_name or account_key:
-        return account_name, account_key
-
-    if connection_string.strip().lower() == "usedevelopmentstorage=true":
-        return _emulator_credentials()
-    return None, None
-
-
-def _emulator_credentials() -> tuple[str | None, str | None]:
-    try:
-        from azure.storage.blob import BlobServiceClient  # pyright: ignore[reportMissingImports]
-
-        service_client = BlobServiceClient.from_connection_string("UseDevelopmentStorage=true")
-        credential = service_client.credential
-        return service_client.account_name, getattr(credential, "account_key", None)
-    except Exception:  # pragma: no cover - defensive, the SDK is a hard dependency
-        return DEFAULT_BLOB_ACCOUNT, None
-
-
-def _account_name_from_connection_string(connection_string: str | None) -> str | None:
-    """Pull `AccountName` out of an Azure Storage connection string."""
-
-    return account_credentials_from_connection_string(connection_string)[0]
-
-
 def default_voice_models() -> dict[str, str]:
     return {
         DEFAULT_AUDIO_VOICE: DEFAULT_AUDIO_VOICE_MODEL,
@@ -134,10 +87,6 @@ class _SupportsRun(Protocol):
 
 class _SupportsPost(Protocol):
     def post(self, /, *args: Any, **kwargs: Any) -> Any: ...
-
-
-class _SupportsGetBlobClient(Protocol):
-    def get_blob_client(self, blob: str) -> Any: ...
 
 
 _SCRIPT_SYSTEM_PROMPT = (
@@ -388,55 +337,75 @@ class FalCoverGenerator:
 
 
 @dataclass(slots=True)
-class AzurePodcastBlobStore:
-    container_client: _SupportsGetBlobClient | None = None
-    connection_string: str | None = None
-    container_name: str = DEFAULT_BLOB_CONTAINER
-    blob_prefix: str = DEFAULT_BLOB_PREFIX
-    account_name: str | None = None
+class S3PodcastBlobStore:
+    """Stores generated podcast audio and cover art in S3.
+
+    Objects are private. ``upload_bytes`` returns the canonical **unsigned** URL,
+    which is what gets persisted; the read path mints a presigned token per
+    response (see ``app/url_signing.py``), so a stored record cannot rot into an
+    expired link (E52).
+    """
+
+    bucket: str = DEFAULT_PODCAST_BUCKET
+    client: Any | None = None
+    region: str = "us-east-1"
+    object_prefix: str = DEFAULT_OBJECT_PREFIX
     timeout_seconds: int = 120
 
     def __post_init__(self) -> None:
-        if self.account_name is None:
-            self.account_name = _account_name_from_connection_string(self.connection_string)
-        if self.container_client is None:
-            if self.connection_string is None:
-                raise ValueError("connection_string is required when no Blob client is injected")
-            from azure.storage.blob import BlobServiceClient  # pyright: ignore[reportMissingImports]
-
-            service_client = BlobServiceClient.from_connection_string(self.connection_string)
-            self.container_client = service_client.get_container_client(self.container_name)
+        if self.client is None:
+            boto3 = import_module("boto3")
+            config = import_module("botocore.config")
+            self.client = boto3.client(
+                "s3",
+                region_name=self.region,
+                config=config.Config(
+                    read_timeout=self.timeout_seconds,
+                    connect_timeout=min(10, self.timeout_seconds),
+                ),
+            )
 
     def audio_blob_name(self, podcast_id: str) -> str:
-        return self._blob_name(podcast_id, "podcast.wav")
+        return self._object_key(podcast_id, "podcast.wav")
 
     def cover_blob_name(self, podcast_id: str, *, extension: str) -> str:
-        return self._blob_name(podcast_id, f"cover.{extension}")
+        return self._object_key(podcast_id, f"cover.{extension}")
 
-    def _blob_name(self, podcast_id: str, file_name: str) -> str:
-        prefix = self.blob_prefix.strip("/")
+    def _object_key(self, podcast_id: str, file_name: str) -> str:
+        prefix = self.object_prefix.strip("/")
         if prefix:
             return f"{prefix}/{podcast_id}/{file_name}"
         return f"{podcast_id}/{file_name}"
 
     def upload_bytes(self, *, blob_name: str, data: bytes, content_type: str) -> str:
         try:
-            blob_client = self.container_client.get_blob_client(blob_name)  # type: ignore[union-attr]
-            blob_client.upload_blob(
-                data,
-                overwrite=True,
-                content_type=content_type,
-                timeout=self.timeout_seconds,
+            # ContentType, not content_type: the sync Azure SDK silently swallowed
+            # the bare kwarg this used to pass, so every podcast and cover was
+            # stored as application/octet-stream and nothing failed. boto3 raises
+            # on an unknown kwarg, and the test asserts the stored value.
+            self.client.put_object(  # type: ignore[union-attr]
+                Bucket=self.bucket,
+                Key=blob_name,
+                Body=data,
+                ContentType=content_type,
             )
-        except (TimeoutError, httpx.TimeoutException) as exc:
-            raise PodcastTimeoutError("Azure Blob upload timed out") from exc
+        except (
+            TimeoutError,
+            httpx.TimeoutException,
+            ReadTimeoutError,
+            ConnectTimeoutError,
+        ) as exc:
+            raise PodcastTimeoutError("S3 upload timed out") from exc
         except Exception as exc:  # pragma: no cover - defensive normalization
-            raise PodcastClientError("Azure Blob upload failed") from exc
+            raise PodcastClientError("S3 upload failed") from exc
 
-        url = getattr(blob_client, "url", None)
-        if isinstance(url, str) and url.strip():
-            return url.strip()
-        return f"{self._container_base_url()}/{blob_name.lstrip('/')}"
+        return self.object_url(blob_name)
+
+    def object_url(self, blob_name: str) -> str:
+        return (
+            f"https://{self.bucket}.s3.{self.region}.amazonaws.com/"
+            f"{quote(blob_name.lstrip('/'))}"
+        )
 
     def upload_audio(self, *, podcast_id: str, audio: bytes) -> str:
         return self.upload_bytes(
@@ -453,37 +422,27 @@ class AzurePodcastBlobStore:
             content_type=content_type,
         )
 
-    def _container_base_url(self) -> str:
-        container_url = getattr(self.container_client, "url", None)
-        if isinstance(container_url, str) and container_url.strip():
-            return container_url.rstrip("/")
-
-        account = self.account_name or DEFAULT_BLOB_ACCOUNT
-        return f"https://{account}.blob.core.windows.net/{self.container_name}"
-
 
 __all__ = [
-    "AzurePodcastBlobStore",
+    "BedrockScriptGenerator",
     "DEFAULT_AUDIO_VOICE",
     "DEFAULT_AUDIO_VOICE_MODEL",
-    "DEFAULT_BLOB_ACCOUNT",
-    "DEFAULT_BLOB_CONTAINER",
-    "DEFAULT_BLOB_PREFIX",
+    "DEFAULT_BEDROCK_SCRIPT_MAX_TOKENS",
+    "DEFAULT_BEDROCK_SCRIPT_MODEL",
+    "DEFAULT_FAL_MODEL",
     "DEFAULT_HOST_B_VOICE",
     "DEFAULT_HOST_B_VOICE_MODEL",
-    "DEFAULT_FAL_MODEL",
-    "DEFAULT_BEDROCK_SCRIPT_MODEL",
-    "DEFAULT_BEDROCK_SCRIPT_MAX_TOKENS",
+    "DEFAULT_OBJECT_PREFIX",
+    "DEFAULT_PODCAST_BUCKET",
     "DEFAULT_POLLY_ENGINE",
     "DEFAULT_POLLY_SAMPLE_RATE",
+    "default_voice_models",
     "FalCoverGenerator",
-    "UNKNOWN_IMAGE_CONTENT_TYPE",
-    "UNKNOWN_IMAGE_EXTENSION",
-    "account_credentials_from_connection_string",
-    "BedrockScriptGenerator",
     "PodcastClientError",
     "PodcastTimeoutError",
     "PollyTTSClient",
-    "default_voice_models",
+    "S3PodcastBlobStore",
     "sniff_image_type",
+    "UNKNOWN_IMAGE_CONTENT_TYPE",
+    "UNKNOWN_IMAGE_EXTENSION",
 ]

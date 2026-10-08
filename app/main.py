@@ -5,8 +5,8 @@ from fastapi import BackgroundTasks, Depends, FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from qdrant_client import AsyncQdrantClient
 
-from app.blob_signing import (  # pyright: ignore[reportMissingImports]
-    BlobSasUrlSigner,
+from app.url_signing import (  # pyright: ignore[reportMissingImports]
+    S3PresignedUrlSigner,
     sign_podcast_urls,
     sign_universe_audio_urls,
 )
@@ -14,7 +14,7 @@ from app.config import Settings, get_settings
 from app.podcast_clients import (  # pyright: ignore[reportMissingImports]
     DEFAULT_AUDIO_VOICE,
     DEFAULT_HOST_B_VOICE,
-    AzurePodcastBlobStore,
+    S3PodcastBlobStore,
     BedrockScriptGenerator,
     FalCoverGenerator,
     PollyTTSClient,
@@ -105,9 +105,9 @@ def build_podcast_generation_dependencies(
                 DEFAULT_HOST_B_VOICE: settings.polly_voice_host_b,
             },
         ),
-        blob_store=AzurePodcastBlobStore(
-            connection_string=settings.azure_storage_connection_string,
-            container_name=settings.azure_storage_container,
+        blob_store=S3PodcastBlobStore(
+            bucket=settings.s3_podcast_bucket,
+            region=settings.aws_region,
             timeout_seconds=settings.podcast_timeout_seconds,
         ),
         cover_generator=cover_generator,
@@ -155,10 +155,10 @@ def get_podcast_generation_dependencies() -> PodcastGenerationDependencies | Non
     return None
 
 
-def get_blob_url_signer(settings: Settings = Depends(get_settings)) -> BlobSasUrlSigner:
-    return BlobSasUrlSigner(
-        connection_string=settings.azure_storage_connection_string,
-        ttl_minutes=settings.blob_sas_ttl_minutes,
+def get_url_signer(settings: Settings = Depends(get_settings)) -> S3PresignedUrlSigner:
+    return S3PresignedUrlSigner(
+        region=settings.aws_region,
+        ttl_minutes=settings.presigned_url_ttl_minutes,
     )
 
 
@@ -217,7 +217,7 @@ async def run_podcast_generation_from_settings(
 @app.get("/universe", response_model=UniverseResponse)
 async def get_universe(
     point_reader: QdrantPointReader = Depends(get_point_reader),
-    signer: BlobSasUrlSigner = Depends(get_blob_url_signer),
+    signer: S3PresignedUrlSigner = Depends(get_url_signer),
 ) -> UniverseResponse:
     try:
         points = await point_reader.read_points()
@@ -255,7 +255,7 @@ async def create_podcast(
 @app.get("/podcasts", response_model=list[PodcastListItem])
 async def list_podcasts(
     repository: PodcastRepository = Depends(get_podcast_repository),
-    signer: BlobSasUrlSigner = Depends(get_blob_url_signer),
+    signer: S3PresignedUrlSigner = Depends(get_url_signer),
 ) -> list[PodcastListItem]:
     return [sign_podcast_urls(podcast, signer) for podcast in repository.list()]
 
@@ -264,7 +264,7 @@ async def list_podcasts(
 async def get_podcast(
     podcast_id: str,
     repository: PodcastRepository = Depends(get_podcast_repository),
-    signer: BlobSasUrlSigner = Depends(get_blob_url_signer),
+    signer: S3PresignedUrlSigner = Depends(get_url_signer),
 ) -> PodcastDetail:
     podcast = repository.get_by_id(podcast_id)
     if podcast is None:
@@ -277,7 +277,7 @@ __all__ = [
     "Settings",
     "app",
     "build_podcast_generation_dependencies",
-    "get_blob_url_signer",
+    "get_url_signer",
     "get_point_reader",
     "get_podcast_generation_dependencies",
     "get_podcast_repository",

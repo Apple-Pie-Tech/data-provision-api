@@ -171,7 +171,6 @@ def test_build_podcast_generation_dependencies_uses_configured_polly_voices(
         polly_sample_rate="8000",
         polly_voice_host_a="local-voice-a",
         polly_voice_host_b="local-voice-b",
-        azure_storage_connection_string="UseDevelopmentStorage=true",
     )
 
     dependencies = build_podcast_generation_dependencies(
@@ -194,7 +193,6 @@ def test_build_podcast_generation_dependencies_threads_bedrock_settings(monkeypa
         aws_region="eu-west-1",
         bedrock_script_model="amazon.nova-lite-v1:0",
         bedrock_script_max_tokens=777,
-        azure_storage_connection_string="UseDevelopmentStorage=true",
     )
 
     dependencies = build_podcast_generation_dependencies(
@@ -216,7 +214,6 @@ def test_build_podcast_generation_dependencies_threads_fal_key(monkeypatch) -> N
     settings = Settings(
         _env_file=None,
         fal_key="fal-key-from-settings",
-        azure_storage_connection_string="UseDevelopmentStorage=true",
     )
 
     dependencies = build_podcast_generation_dependencies(

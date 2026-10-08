@@ -6,12 +6,12 @@ import httpx
 import pytest
 
 from app.podcast_clients import (  # pyright: ignore[reportMissingImports]
-    AzurePodcastBlobStore,
     BedrockScriptGenerator,
     FalCoverGenerator,
     PodcastClientError,
     PodcastTimeoutError,
     PollyTTSClient,
+    S3PodcastBlobStore,
 )
 from app.podcast_schemas import PodcastScript, PodcastScriptLine
 
@@ -69,23 +69,22 @@ class FakeFalClient:
         return self.result
 
 
-class FakeBlobClient:
-    def __init__(self, url: str) -> None:
-        self.url = url
+class FakeS3:
+    """Stands in for boto3's S3 client, recording the exact kwargs it is sent."""
+
+    def __init__(self, error: Exception | None = None) -> None:
+        self.error = error
         self.calls: list[dict[str, object]] = []
 
-    def upload_blob(self, data: bytes, **kwargs: object) -> None:
-        self.calls.append({"data": data, **kwargs})
+    def put_object(self, **kwargs: object) -> dict[str, object]:
+        if self.error is not None:
+            raise self.error
+        self.calls.append(kwargs)
+        return {}
 
-
-class FakeContainerClient:
-    def __init__(self, blob_client: FakeBlobClient) -> None:
-        self.blob_client = blob_client
-        self.calls: list[str] = []
-
-    def get_blob_client(self, blob: str) -> FakeBlobClient:
-        self.calls.append(blob)
-        return self.blob_client
+    @property
+    def keys(self) -> list[object]:
+        return [call["Key"] for call in self.calls]
 
 
 def test_bedrock_script_generator_parses_json_and_trims_parts() -> None:
@@ -221,27 +220,41 @@ def test_fal_cover_generator_returns_url_from_fal_result() -> None:
     ]
 
 
-def test_azure_blob_store_uploads_bytes_to_expected_path() -> None:
-    blob_client = FakeBlobClient(url="https://account.blob.core.windows.net/podcasts/podcast-1/podcast.wav")
-    container_client = FakeContainerClient(blob_client)
-    store = AzurePodcastBlobStore(container_client=container_client, timeout_seconds=19)
+def test_s3_blob_store_uploads_audio_to_the_expected_key() -> None:
+    fake = FakeS3()
+    store = S3PodcastBlobStore(client=fake, bucket="applepie-podcasts", timeout_seconds=19)
 
     url = store.upload_audio(podcast_id="podcast-1", audio=b"wav-bytes")
 
-    assert url == "https://account.blob.core.windows.net/podcasts/podcast-1/podcast.wav"
-    assert container_client.calls == ["podcast-1/podcast.wav"]
-    assert blob_client.calls == [
+    assert url == (
+        "https://applepie-podcasts.s3.us-east-1.amazonaws.com/podcast-1/podcast.wav"
+    )
+    assert fake.calls == [
         {
-            "data": b"wav-bytes",
-            "overwrite": True,
-            "content_type": "audio/wav",
-            "timeout": 19,
+            "Bucket": "applepie-podcasts",
+            "Key": "podcast-1/podcast.wav",
+            "Body": b"wav-bytes",
+            "ContentType": "audio/wav",
         }
     ]
 
 
+def test_s3_blob_store_stores_an_unsigned_url() -> None:
+    """E52: the persisted URL must be the canonical one, signed only at read time.
+
+    Storing a presigned URL would put an expiry into the podcasts table and the
+    record would rot into a dead link.
+    """
+    store = S3PodcastBlobStore(client=FakeS3(), bucket="applepie-podcasts")
+
+    url = store.upload_audio(podcast_id="podcast-1", audio=b"wav-bytes")
+
+    assert "X-Amz-Signature" not in url
+    assert "?" not in url
+
+
 @pytest.mark.parametrize(
-    ("cover", "expected_name", "expected_content_type"),
+    ("cover", "expected_key", "expected_content_type"),
     [
         (JPEG_BYTES, "podcast-1/cover.jpg", "image/jpeg"),
         (PNG_BYTES, "podcast-1/cover.png", "image/png"),
@@ -249,24 +262,109 @@ def test_azure_blob_store_uploads_bytes_to_expected_path() -> None:
         (b"not-an-image", "podcast-1/cover.bin", "application/octet-stream"),
     ],
 )
-def test_azure_blob_store_names_the_cover_after_its_real_image_type(
-    cover: bytes, expected_name: str, expected_content_type: str
+def test_s3_blob_store_names_the_cover_after_its_real_image_type(
+    cover: bytes, expected_key: str, expected_content_type: str
 ) -> None:
     """E46: fal.ai returns JPEG, so `cover.png`/`image/png` was a lie about the bytes."""
 
-    blob_client = FakeBlobClient(url="https://account.blob.core.windows.net/podcasts/x")
-    container_client = FakeContainerClient(blob_client)
-    store = AzurePodcastBlobStore(container_client=container_client)
+    fake = FakeS3()
+    store = S3PodcastBlobStore(client=fake, bucket="applepie-podcasts")
 
     store.upload_cover(podcast_id="podcast-1", cover=cover)
 
-    assert container_client.calls == [expected_name]
-    assert blob_client.calls[0]["content_type"] == expected_content_type
+    assert fake.keys == [expected_key]
+    assert fake.calls[0]["ContentType"] == expected_content_type
 
 
-def test_azure_blob_store_fails_without_connection_or_injected_client() -> None:
-    with pytest.raises(ValueError):
-        AzurePodcastBlobStore()
+def test_s3_blob_store_sets_a_real_content_type_on_the_request() -> None:
+    """The sync Azure SDK silently ignored the bare `content_type=` kwarg.
+
+    Every podcast and cover was therefore stored as application/octet-stream,
+    and the old test passed because it only asserted a kwarg had been recorded.
+    boto3's spelling is `ContentType`, and the value is what matters.
+    """
+    fake = FakeS3()
+    store = S3PodcastBlobStore(client=fake, bucket="applepie-podcasts")
+
+    store.upload_bytes(blob_name="p1/podcast.wav", data=b"x", content_type="audio/wav")
+
+    assert fake.calls[0]["ContentType"] == "audio/wav"
+    assert "content_type" not in fake.calls[0]
+
+
+def test_s3_blob_store_default_prefix_does_not_repeat_the_bucket_name() -> None:
+    """E47: a `podcasts` prefix on a podcasts bucket gave `podcasts/podcasts/<id>/`."""
+    fake = FakeS3()
+    store = S3PodcastBlobStore(client=fake, bucket="applepie-podcasts")
+
+    store.upload_audio(podcast_id="podcast-1", audio=b"wav-bytes")
+
+    assert fake.keys == ["podcast-1/podcast.wav"]
+
+
+def test_s3_blob_store_honours_a_custom_object_prefix() -> None:
+    fake = FakeS3()
+    store = S3PodcastBlobStore(
+        client=fake, bucket="applepie-podcasts", object_prefix="episodes"
+    )
+
+    store.upload_audio(podcast_id="podcast-1", audio=b"wav-bytes")
+    store.upload_cover(podcast_id="podcast-1", cover=PNG_BYTES)
+
+    assert fake.keys == [
+        "episodes/podcast-1/podcast.wav",
+        "episodes/podcast-1/cover.png",
+    ]
+
+
+def test_s3_blob_store_urls_are_bucket_hosted_not_bucket_pathed() -> None:
+    """E21, in its S3 form: the bucket belongs in the host, not as a path segment."""
+    store = S3PodcastBlobStore(
+        client=FakeS3(), bucket="applepie-podcasts", region="eu-west-1"
+    )
+
+    url = store.upload_audio(podcast_id="podcast-1", audio=b"wav-bytes")
+
+    assert url == (
+        "https://applepie-podcasts.s3.eu-west-1.amazonaws.com/podcast-1/podcast.wav"
+    )
+
+
+def test_s3_blob_store_wraps_timeouts_as_controlled_errors() -> None:
+    request = httpx.Request("PUT", "https://applepie-podcasts.s3.amazonaws.com/x")
+    store = S3PodcastBlobStore(
+        client=FakeS3(error=httpx.ReadTimeout("timed out", request=request)),
+        bucket="applepie-podcasts",
+    )
+
+    with pytest.raises(PodcastTimeoutError):
+        store.upload_audio(podcast_id="podcast-1", audio=b"wav-bytes")
+
+
+def test_s3_blob_store_wraps_other_failures_as_controlled_errors() -> None:
+    store = S3PodcastBlobStore(
+        client=FakeS3(error=RuntimeError("AccessDenied")), bucket="applepie-podcasts"
+    )
+
+    with pytest.raises(PodcastClientError, match="S3 upload failed"):
+        store.upload_audio(podcast_id="podcast-1", audio=b"wav-bytes")
+
+
+def test_s3_blob_store_builds_its_client_from_settings(monkeypatch) -> None:
+    captured: dict[str, object] = {}
+
+    def fake_client(service: str, **kwargs: object) -> object:
+        captured["service"] = service
+        captured.update(kwargs)
+        return object()
+
+    monkeypatch.setattr("boto3.client", fake_client)
+
+    S3PodcastBlobStore(bucket="applepie-podcasts", region="eu-west-1", timeout_seconds=19)
+
+    assert captured["service"] == "s3"
+    assert captured["region_name"] == "eu-west-1"
+    assert captured["config"].read_timeout == 19
 
 
 def test_wrapper_errors_are_controlled_for_fal_url_missing() -> None:
@@ -319,61 +417,3 @@ def test_fal_cover_generator_builds_its_client_from_the_configured_key() -> None
 
     assert generator.client.key == "fal-key-from-settings"
     assert generator.client.default_timeout == 17
-
-
-class UrllessBlobClient:
-    """A blob client with no `url`, forcing the fallback URL construction."""
-
-    def __init__(self) -> None:
-        self.calls: list[dict[str, object]] = []
-
-    def upload_blob(self, data: bytes, **kwargs: object) -> None:
-        self.calls.append({"data": data, **kwargs})
-
-
-def test_azure_blob_store_honours_a_custom_blob_prefix() -> None:
-    blob_client = FakeBlobClient(url="https://account.blob.core.windows.net/podcasts/x")
-    container_client = FakeContainerClient(blob_client)
-    store = AzurePodcastBlobStore(container_client=container_client, blob_prefix="episodes")
-
-    store.upload_audio(podcast_id="podcast-1", audio=b"wav-bytes")
-    store.upload_cover(podcast_id="podcast-1", cover=PNG_BYTES)
-
-    assert container_client.calls == [
-        "episodes/podcast-1/podcast.wav",
-        "episodes/podcast-1/cover.png",
-    ]
-
-
-def test_azure_blob_store_fallback_url_uses_the_account_host_not_the_container() -> None:
-    """E21: the container name is a path segment, never the storage host."""
-
-    container_client = FakeContainerClient(UrllessBlobClient())
-    store = AzurePodcastBlobStore(
-        container_client=container_client,
-        container_name="podcasts",
-        account_name="applepiestories",
-    )
-
-    url = store.upload_audio(podcast_id="podcast-1", audio=b"wav-bytes")
-
-    assert url == (
-        "https://applepiestories.blob.core.windows.net/podcasts/podcast-1/podcast.wav"
-    )
-
-
-def test_azure_blob_store_derives_the_account_name_from_the_connection_string() -> None:
-    container_client = FakeContainerClient(UrllessBlobClient())
-    store = AzurePodcastBlobStore(
-        container_client=container_client,
-        connection_string=(
-            "DefaultEndpointsProtocol=https;AccountName=applepiestories;"
-            "AccountKey=placeholder;EndpointSuffix=core.windows.net"
-        ),
-        container_name="podcasts",
-    )
-
-    assert store.account_name == "applepiestories"
-    assert store.upload_cover(podcast_id="p1", cover=PNG_BYTES).startswith(
-        "https://applepiestories.blob.core.windows.net/podcasts/"
-    )

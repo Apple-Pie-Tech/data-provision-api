@@ -52,7 +52,6 @@ def test_env_example_uses_placeholders_and_no_real_secrets() -> None:
     expected_blank_keys = {
         "DATABASE_URL",
         "FAL_KEY",
-        "AZURE_STORAGE_CONNECTION_STRING",
         "QDRANT_API_KEY",
     }
 
@@ -70,8 +69,11 @@ def test_env_example_uses_placeholders_and_no_real_secrets() -> None:
     assert assignments["POLLY_SAMPLE_RATE"] == "16000"
     assert assignments["POLLY_VOICE_HOST_A"] == "Ruth"
     assert assignments["POLLY_VOICE_HOST_B"] == "Matthew"
-    assert "AZURE_STORAGE_ACCOUNT" not in assignments
-    assert assignments["AZURE_STORAGE_CONTAINER"] == "podcasts"
+    # Nothing Azure survives the storage migration, and no AWS key may appear
+    # here either: S3 authenticates with the execution role.
+    assert not any(key.startswith("AZURE_") for key in assignments)
+    assert assignments["S3_PODCAST_BUCKET"] == "applepie-podcasts"
+    assert assignments["PRESIGNED_URL_TTL_MINUTES"] == "60"
     assert assignments["QDRANT_URL"] == "http://qdrant:6333"
     assert assignments["QDRANT_COLLECTION"] == "apple_pie_story_chunks"
 

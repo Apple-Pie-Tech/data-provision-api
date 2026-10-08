@@ -8,6 +8,9 @@ from app.podcast_schemas import (  # pyright: ignore[reportMissingImports]
 
 
 def _assert_no_secret_fields(value: object) -> None:
+    # Names that have ever carried a credential or an internal endpoint in this
+    # service, kept including the retired ones so a revert cannot reintroduce a
+    # leak unnoticed.
     secret_field_names = {
         "database_url",
         "openai_api_key",
@@ -16,6 +19,9 @@ def _assert_no_secret_fields(value: object) -> None:
         "fal_key",
         "azure_storage_container",
         "azure_storage_connection_string",
+        "s3_podcast_bucket",
+        "aws_access_key_id",
+        "aws_secret_access_key",
     }
 
     if isinstance(value, dict):
