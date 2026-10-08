@@ -31,15 +31,13 @@ def _assignment_lines(content: str) -> list[str]:
     return lines
 
 
-def test_env_example_documents_azure_setup_and_runtime_caveats() -> None:
+def test_env_example_documents_the_runtime_caveats() -> None:
     content = ENV_EXAMPLE_PATH.read_text(encoding="utf-8")
 
-    assert "Azure PostgreSQL Flexible Server" in content
-    assert "az postgres flexible-server create" in content
-    assert (
-        "DATABASE_URL=postgresql://<user>:<password>@<server>.postgres.database.azure.com:5432/<database>?sslmode=require"
-        in content
-    )
+    # The table is reached with the execution role, so there is no connection
+    # string to document and no password to leak into this file.
+    assert "DYNAMODB_PODCASTS_TABLE" in content
+    assert "created by Terraform" in content
     assert "Background podcast jobs are best-effort only." in content
     assert "not durable across restarts" in content
 
@@ -50,7 +48,6 @@ def test_env_example_uses_placeholders_and_no_real_secrets() -> None:
     env_lines = _assignment_lines(content)
 
     expected_blank_keys = {
-        "DATABASE_URL",
         "FAL_KEY",
         "S3_VECTOR_BUCKET",
     }
@@ -75,7 +72,10 @@ def test_env_example_uses_placeholders_and_no_real_secrets() -> None:
     assert assignments["S3_PODCAST_BUCKET"] == "applepie-podcasts"
     assert assignments["PRESIGNED_URL_TTL_MINUTES"] == "60"
     assert assignments["S3_VECTOR_INDEX"] == "apple-pie-story-chunks"
+    assert assignments["DYNAMODB_PODCASTS_TABLE"] == "applepie-podcasts"
 
+    # Markers of every credential shape this service has ever carried, kept
+    # including the retired ones so a revert cannot reintroduce one unnoticed.
     forbidden_secret_markers = (
         "DefaultEndpointsProtocol=",
         "AccountName=",
@@ -84,6 +84,7 @@ def test_env_example_uses_placeholders_and_no_real_secrets() -> None:
         "postgresql://",
         "postgres://",
         "sk-",
+        "AKIA",
     )
 
     for marker in forbidden_secret_markers:

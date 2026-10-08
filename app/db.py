@@ -1,58 +1,81 @@
 from __future__ import annotations
 
-from typing import Any, Protocol, cast
-
-import psycopg
-from psycopg.rows import dict_row
+from importlib import import_module
+from typing import Any, Protocol
 
 from app.config import get_settings
 
 
-class SupportsDatabaseConnection(Protocol):
-    def cursor(self) -> Any: ...
+PARTITION_KEY = "id"
 
-    def commit(self) -> None: ...
-
-
-CREATE_PODCASTS_TABLE_SQL = """
-CREATE TABLE IF NOT EXISTS podcasts (
-    id TEXT PRIMARY KEY,
-    label TEXT NOT NULL,
-    status TEXT NOT NULL CHECK (status IN ('pending', 'running', 'completed', 'failed')),
-    script_json JSONB,
-    audio_url TEXT,
-    cover_url TEXT,
-    error TEXT,
-    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    started_at TIMESTAMPTZ,
-    completed_at TIMESTAMPTZ
-);
-""".strip()
+# Attribute names used in expressions must be aliased when DynamoDB reserves
+# them. `status` is reserved; the rest are aliased too so adding an attribute
+# cannot quietly hit the reserved-word list.
+ITEM_ATTRIBUTES: tuple[str, ...] = (
+    "id",
+    "label",
+    "status",
+    "script_json",
+    "audio_url",
+    "cover_url",
+    "error",
+    "created_at",
+    "updated_at",
+    "started_at",
+    "completed_at",
+)
 
 
-def create_connection() -> psycopg.Connection[Any]:
+class SupportsTable(Protocol):
+    """The subset of boto3's DynamoDB Table resource this service uses."""
+
+    def get_item(self, **kwargs: Any) -> dict[str, Any]: ...
+
+    def put_item(self, **kwargs: Any) -> dict[str, Any]: ...
+
+    def update_item(self, **kwargs: Any) -> dict[str, Any]: ...
+
+    def scan(self, **kwargs: Any) -> dict[str, Any]: ...
+
+
+def create_table() -> Any:
+    """Return the podcasts table resource.
+
+    The `resource` interface rather than the low-level client, so items are
+    plain Python dicts instead of AttributeValue wrappers. Every attribute this
+    service stores is a string, so none of the resource layer's Decimal
+    behaviour comes into play.
+    """
     settings = get_settings()
-    if not settings.database_url:
-        raise RuntimeError("database_url is required")
+    if not settings.dynamodb_podcasts_table:
+        raise RuntimeError("dynamodb_podcasts_table is required")
 
-    return psycopg.connect(settings.database_url, row_factory=cast(Any, dict_row))
-
-
-def _create_tables(connection: SupportsDatabaseConnection) -> None:
-    with connection.cursor() as cursor:
-        cursor.execute(CREATE_PODCASTS_TABLE_SQL)
+    boto3 = import_module("boto3")
+    resource = boto3.resource("dynamodb", region_name=settings.aws_region)
+    return resource.Table(settings.dynamodb_podcasts_table)
 
 
-def init_db(connection: SupportsDatabaseConnection | None = None) -> None:
-    if connection is None:
-        with create_connection() as opened_connection:
-            _create_tables(opened_connection)
-            opened_connection.commit()
-            return
+def init_db(table: Any | None = None) -> None:
+    """Deliberately does nothing.
 
-    _create_tables(connection)
-    connection.commit()
+    The table is created by Terraform. It used to be `CREATE TABLE IF NOT
+    EXISTS`, which meant every request opened a connection and issued DDL; the
+    equivalent here would be CreateTable, and a service role that can create
+    tables is a wider grant than this service has any use for. A missing table
+    surfaces as DynamoDB's own ResourceNotFoundException on first use, which
+    names the table.
+
+    Kept as a no-op rather than removed because it is the request lifecycle's
+    hook for schema setup, and callers should not have to care which backend
+    needs one.
+    """
+    return None
 
 
-__all__ = ["CREATE_PODCASTS_TABLE_SQL", "SupportsDatabaseConnection", "create_connection", "init_db"]
+__all__ = [
+    "ITEM_ATTRIBUTES",
+    "PARTITION_KEY",
+    "SupportsTable",
+    "create_table",
+    "init_db",
+]

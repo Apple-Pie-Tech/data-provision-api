@@ -14,7 +14,6 @@ dependencies = [
   "boto3>=1.35",
   "pydub>=0.25",
   "pydantic-settings>=2.7",
-  "psycopg[binary]>=3.2",
   "uvicorn[standard]>=0.30",
 ]
 

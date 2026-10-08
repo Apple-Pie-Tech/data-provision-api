@@ -299,7 +299,6 @@ def test_create_podcast_rejects_blank_label(label: str) -> None:
     repository, _ = _build_fakes()
     _override_repository(repository)
     app.dependency_overrides[get_settings] = lambda: Settings(
-        database_url="postgresql://placeholder",
         qdrant_url="http://qdrant:6333",
         qdrant_api_key="",
     )
@@ -399,7 +398,6 @@ def test_create_podcast_bootstraps_and_closes_separate_request_and_background_re
     monkeypatch.setattr("app.main.run_podcast_generation", fake_run_generation)
 
     app.dependency_overrides[get_settings] = lambda: Settings(
-        database_url="postgresql://placeholder",
         s3_vector_bucket="applepie-vectors",
         s3_vector_index="data_provision_points",
     )
@@ -488,7 +486,7 @@ async def test_background_generation_records_a_dependency_construction_failure(
 
     await run_podcast_generation_from_settings(
         "podcast-1",
-        Settings(database_url="postgresql://placeholder"),
+        Settings(),
     )
 
     assert rows["podcast-1"].status == "failed"

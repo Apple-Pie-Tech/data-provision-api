@@ -25,7 +25,9 @@ class Settings(BaseSettings):
         "http://127.0.0.1:8080,http://localhost:8080"
     )
 
-    database_url: str | None = None
+    # Podcasts table, created by Terraform. Partition key `id`, on-demand
+    # billing, no sort key: the list view is a Scan ordered in the service.
+    dynamodb_podcasts_table: str = "applepie-podcasts"
 
     aws_region: str = "us-east-1"
     bedrock_script_model: str = DEFAULT_BEDROCK_SCRIPT_MODEL
