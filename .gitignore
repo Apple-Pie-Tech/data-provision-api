@@ -3,3 +3,6 @@ __pycache__/
 *.py[cod]
 .pytest_cache/
 .idea/
+*.egg-info/
+.ruff_cache/
+.venv/
