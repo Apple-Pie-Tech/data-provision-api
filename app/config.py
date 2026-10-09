@@ -22,6 +22,11 @@ from app.podcast_clients import (  # pyright: ignore[reportMissingImports]
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
+    # Checked against the `x-api-key` header on POST /podcasts, mirroring
+    # data-ingestion's INGEST_API_KEY. Blank disables the check.
+    provision_api_key: str | None = None
+    provision_api_key_secret_arn: str | None = None
+
     cors_allow_origins: str = (
         "http://127.0.0.1:8081,http://localhost:8081,"
         "http://127.0.0.1:8080,http://localhost:8080"
@@ -65,6 +70,7 @@ class Settings(BaseSettings):
 # Target field -> the setting holding the ARN to resolve it from.
 SECRET_FIELD_ARNS = {
     "fal_key": "fal_key_secret_arn",
+    "provision_api_key": "provision_api_key_secret_arn",
 }
 
 

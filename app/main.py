@@ -1,8 +1,10 @@
+import logging
+import secrets
 from collections.abc import Iterator
 from dataclasses import dataclass
 
 import boto3
-from fastapi import BackgroundTasks, Depends, FastAPI, HTTPException
+from fastapi import BackgroundTasks, Depends, FastAPI, Header, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.config import Settings, get_settings
@@ -41,6 +43,45 @@ from app.vector_store import (  # pyright: ignore[reportMissingImports]
 )
 
 
+logger = logging.getLogger(__name__)
+
+
+def _configured_provision_api_key(settings: Settings) -> str:
+    return (settings.provision_api_key or "").strip()
+
+
+async def require_provision_api_key(
+    settings: Settings = Depends(get_settings),
+    x_api_key: str | None = Header(default=None),
+) -> None:
+    """Verify the ``x-api-key`` header against ``PROVISION_API_KEY``.
+
+    Applied to POST /podcasts, which is the endpoint that costs money: each call
+    makes a Bedrock call, several Polly calls and S3 writes. The read endpoints
+    are deliberately left open, matching data-ingestion, where the same check
+    guards POST /ingest and nothing else.
+
+    When ``PROVISION_API_KEY`` is unset or blank the check is **skipped**, not
+    failed, for the same reason as in data-ingestion: failing closed would leave
+    a fresh clone with no ``.env`` unable to generate anything, and local
+    development is the path this service has to keep working. ``create_app``
+    logs a warning so an unprotected deployment is not silent.
+
+    This is a deterrent, not authentication. The UI holds the key in an
+    EXPO_PUBLIC_* variable, which is inlined into the public bundle, so it stops
+    drive-by abuse of a discovered function URL rather than a determined caller.
+
+    The 401 carries no detail about the expected key.
+    """
+    expected = _configured_provision_api_key(settings)
+    if not expected:
+        return
+
+    provided = x_api_key or ""
+    if not secrets.compare_digest(provided.encode("utf-8"), expected.encode("utf-8")):
+        raise HTTPException(status_code=401, detail="unauthorized")
+
+
 def _parse_cors_allow_origins(raw_value: str) -> list[str]:
     return [origin for origin in (item.strip() for item in raw_value.split(",")) if origin]
 
@@ -57,6 +98,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             allow_headers=["*"],
             allow_methods=["GET", "POST", "OPTIONS"],
             allow_origins=cors_allow_origins,
+        )
+
+    if not _configured_provision_api_key(resolved_settings):
+        logger.warning(
+            "PROVISION_API_KEY is not set; POST /podcasts accepts unauthenticated "
+            "requests, and each one spends Bedrock and Polly budget"
         )
 
     return application
@@ -231,7 +278,12 @@ async def get_universe(
     return sign_universe_audio_urls(assemble_universe_graph(points), signer)
 
 
-@app.post("/podcasts", response_model=PodcastDetail, status_code=202)
+@app.post(
+    "/podcasts",
+    response_model=PodcastDetail,
+    status_code=202,
+    dependencies=[Depends(require_provision_api_key)],
+)
 async def create_podcast(
     payload: PodcastCreateRequest,
     background_tasks: BackgroundTasks,
