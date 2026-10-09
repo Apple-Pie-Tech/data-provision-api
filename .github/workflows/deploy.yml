@@ -18,9 +18,6 @@ concurrency:
 
 permissions:
   contents: read
-  # Required for OIDC. Without it the role assumption fails with a message that
-  # does not mention permissions.
-  id-token: write
 
 env:
   AWS_REGION: us-east-1
@@ -28,9 +25,38 @@ env:
   ECR_REPOSITORY: applepie-prod/data-provision-api
 
 jobs:
+  test:
+    name: Tests
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v10.2.0
+        with:
+          enable-cache: true
+
+      - name: Run the test suite
+        # --frozen: install exactly what uv.lock pins and fail rather than
+        # resolve. CI must run the dependency set the lock file describes, not
+        # whatever resolves today. uv provisions the interpreter requires-python
+        # asks for, so there is no setup-python step.
+        run: uv run --frozen pytest
+
   deploy:
     name: Build and deploy
     runs-on: ubuntu-latest
+    # The gate. Nothing is built, pushed or pointed at the function until the
+    # suite is green, so a commit that breaks the tests cannot reach production.
+    needs: test
+    permissions:
+      contents: read
+      # Required for OIDC. Without it the role assumption fails with a message
+      # that does not mention permissions. Scoped to this job: the test job has
+      # no business minting an AWS-assumable token.
+      id-token: write
 
     steps:
       - name: Check out repository
