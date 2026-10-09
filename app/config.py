@@ -3,6 +3,8 @@ from functools import lru_cache
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+from app.secrets import resolve_secret_fields  # pyright: ignore[reportMissingImports]
+
 from app.url_signing import (  # pyright: ignore[reportMissingImports]
     DEFAULT_PRESIGNED_URL_TTL_MINUTES,
 )
@@ -33,6 +35,10 @@ class Settings(BaseSettings):
     bedrock_script_model: str = DEFAULT_BEDROCK_SCRIPT_MODEL
     bedrock_script_max_tokens: int = DEFAULT_BEDROCK_SCRIPT_MAX_TOKENS
     fal_key: str | None = None
+    # Set by Terraform instead of the value above: a secret value in a Lambda
+    # environment variable would be recorded in Terraform state in plaintext.
+    # Resolved once by get_settings(); the plain field still works locally.
+    fal_key_secret_arn: str | None = None
 
     polly_engine: str = DEFAULT_POLLY_ENGINE
     polly_sample_rate: str = DEFAULT_POLLY_SAMPLE_RATE
@@ -56,6 +62,25 @@ class Settings(BaseSettings):
     vector_list_batch_size: int = 500
 
 
+# Target field -> the setting holding the ARN to resolve it from.
+SECRET_FIELD_ARNS = {
+    "fal_key": "fal_key_secret_arn",
+}
+
+
 @lru_cache(maxsize=1)
 def get_settings() -> Settings:
-    return Settings()
+    """Build Settings, resolving any Secrets Manager ARNs it was given.
+
+    Cached, so the Secrets Manager call happens once per execution environment
+    rather than once per request.
+    """
+    settings = Settings()
+    resolved = resolve_secret_fields(
+        settings,
+        SECRET_FIELD_ARNS,
+        region=settings.aws_region,
+    )
+    if not resolved:
+        return settings
+    return settings.model_copy(update=resolved)
