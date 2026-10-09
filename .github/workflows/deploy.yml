@@ -58,7 +58,12 @@ jobs:
           # with immutable tags, so a reused tag is an error rather than a
           # silent change to what the function runs.
           image="$REGISTRY/$ECR_REPOSITORY:${{ github.sha }}"
-          docker build --platform linux/amd64 -t "$image" .
+          # --provenance/--sbom off: with BuildKit's default attestations the
+          # pushed artifact is an OCI image *index* rather than a single
+          # manifest. Lambda rejects an index, and ECR's untagged-expiry rule
+          # would collect the child manifest the index points at.
+          docker build --platform linux/amd64 --provenance=false --sbom=false \
+            -t "$image" .
           docker push "$image"
           echo "image=$image" >>"$GITHUB_OUTPUT"
 
