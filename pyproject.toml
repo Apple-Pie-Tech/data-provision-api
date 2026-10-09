@@ -8,6 +8,11 @@ version = "0.1.0"
 description = "Minimal FastAPI scaffold for data provision services"
 requires-python = ">=3.12,<3.13"
 dependencies = [
+  # Verifying the Supabase access token. The [crypto] extra pulls in
+  # cryptography, which is what implements ES256/RS256 -- the stdlib has no
+  # ECDSA. Imported lazily in app/supabase_jwt.py to keep it off the Lambda
+  # init path; see that module\'s docstring.
+  "pyjwt[crypto]>=2.9",
   "fastapi>=0.115",
   "fal-client>=0.7",
   "httpx>=0.27",

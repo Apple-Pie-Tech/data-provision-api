@@ -27,6 +27,21 @@ class Settings(BaseSettings):
     provision_api_key: str | None = None
     provision_api_key_secret_arn: str | None = None
 
+    # Verifying the Supabase access token the UI already holds is what makes
+    # the write endpoint authenticated rather than merely deterred. Unset means
+    # the check is SKIPPED, matching PROVISION_API_KEY above and for the same reason:
+    # a fresh clone with no .env has to keep working. Terraform always sets it,
+    # and create_app warns when it is missing so an open deployment is not
+    # silent.
+    supabase_url: str | None = None
+    supabase_jwt_audience: str = "authenticated"
+    # Only for a project still signing with the legacy HS256 shared secret. In
+    # the asymmetric regime (ES256/RS256) the keys are published at the
+    # project's JWKS endpoint and there is no secret to hold at all.
+    supabase_jwt_secret: str | None = None
+    supabase_jwt_secret_arn: str | None = None
+    supabase_jwks_cache_seconds: int = 600
+
     cors_allow_origins: str = (
         "http://127.0.0.1:8081,http://localhost:8081,"
         "http://127.0.0.1:8080,http://localhost:8080"
@@ -71,6 +86,7 @@ class Settings(BaseSettings):
 SECRET_FIELD_ARNS = {
     "fal_key": "fal_key_secret_arn",
     "provision_api_key": "provision_api_key_secret_arn",
+    "supabase_jwt_secret": "supabase_jwt_secret_arn",
 }
 
 

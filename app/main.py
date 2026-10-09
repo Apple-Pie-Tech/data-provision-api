@@ -2,6 +2,7 @@ import logging
 import secrets
 from collections.abc import Iterator
 from dataclasses import dataclass
+from functools import lru_cache
 
 import boto3
 from fastapi import BackgroundTasks, Depends, FastAPI, Header, HTTPException
@@ -32,6 +33,12 @@ from app.podcast_schemas import (  # pyright: ignore[reportMissingImports]
     PodcastListItem,
 )
 from app.schemas import UniverseResponse  # pyright: ignore[reportMissingImports]
+from app.supabase_jwt import (  # pyright: ignore[reportMissingImports]
+    SupabaseIdentity,
+    SupabaseJwtError,
+    SupabaseJwtUnavailableError,
+    SupabaseJwtVerifier,
+)
 from app.universe import assemble_universe_graph  # pyright: ignore[reportMissingImports]
 from app.url_signing import (  # pyright: ignore[reportMissingImports]
     S3PresignedUrlSigner,
@@ -48,6 +55,10 @@ logger = logging.getLogger(__name__)
 
 def _configured_provision_api_key(settings: Settings) -> str:
     return (settings.provision_api_key or "").strip()
+
+
+def _configured_supabase_url(settings: Settings) -> str:
+    return (settings.supabase_url or "").strip()
 
 
 async def require_provision_api_key(
@@ -82,6 +93,89 @@ async def require_provision_api_key(
         raise HTTPException(status_code=401, detail="unauthorized")
 
 
+@lru_cache(maxsize=1)
+def _build_supabase_verifier(
+    supabase_url: str,
+    audience: str,
+    hs256_secret: str | None,
+    cache_seconds: int,
+) -> SupabaseJwtVerifier:
+    """One verifier per process, so its key cache survives between requests.
+
+    Cached on the values rather than on Settings because Settings is not
+    hashable. Under the Lambda Web Adapter the uvicorn process outlives a single
+    invocation, so this is also the cross-invocation cache -- see
+    app/supabase_jwt.py.
+    """
+    return SupabaseJwtVerifier(
+        supabase_url=supabase_url,
+        audience=audience,
+        hs256_secret=hs256_secret,
+        cache_seconds=cache_seconds,
+    )
+
+
+def get_supabase_verifier(
+    settings: Settings = Depends(get_settings),
+) -> SupabaseJwtVerifier | None:
+    """None when SUPABASE_URL is unset, which skips verification entirely."""
+    supabase_url = _configured_supabase_url(settings)
+    if not supabase_url:
+        return None
+
+    return _build_supabase_verifier(
+        supabase_url,
+        settings.supabase_jwt_audience,
+        (settings.supabase_jwt_secret or "").strip() or None,
+        settings.supabase_jwks_cache_seconds,
+    )
+
+
+async def get_supabase_identity(
+    verifier: SupabaseJwtVerifier | None = Depends(get_supabase_verifier),
+    authorization: str | None = Header(default=None),
+) -> SupabaseIdentity | None:
+    """Verify the `Authorization: Bearer <supabase access token>` header.
+
+    Applied to POST /podcasts, the endpoint that spends money: one Bedrock call,
+    several Polly calls and S3 writes per request. The read endpoints stay open
+    -- see README.md, "What is not protected", and the test that pins it.
+
+    Returns None when ``SUPABASE_URL`` is unset, the same "unset means skip"
+    convention as ``require_provision_api_key`` and for the same reason: local
+    development has to keep working, and it lets this code deploy before the
+    variable is set. ``create_app`` warns in that case.
+
+    Once it *is* set there is no path back to unauthenticated. A JWKS endpoint
+    that cannot be reached is a 503, never a 401 and never a 200: blaming the
+    user for a Supabase outage is wrong, and treating a network error as a pass
+    would be an authentication bypass.
+    """
+    if verifier is None:
+        return None
+
+    scheme, _, token = (authorization or "").partition(" ")
+    if scheme.lower() != "bearer" or not token.strip():
+        raise HTTPException(
+            status_code=401,
+            detail="unauthorized",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+
+    try:
+        return await verifier.verify(token.strip())
+    except SupabaseJwtUnavailableError as exc:
+        logger.exception("could not verify the access token: Supabase is unreachable")
+        raise HTTPException(status_code=503, detail="auth_unavailable") from exc
+    except SupabaseJwtError as exc:
+        logger.warning("rejected an access token: %s", exc)
+        raise HTTPException(
+            status_code=401,
+            detail="unauthorized",
+            headers={"WWW-Authenticate": "Bearer"},
+        ) from exc
+
+
 def _parse_cors_allow_origins(raw_value: str) -> list[str]:
     return [origin for origin in (item.strip() for item in raw_value.split(",")) if origin]
 
@@ -104,6 +198,16 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         logger.warning(
             "PROVISION_API_KEY is not set; POST /podcasts accepts unauthenticated "
             "requests, and each one spends Bedrock and Polly budget"
+        )
+
+    if not _configured_supabase_url(resolved_settings):
+        # Worth its own line: with SUPABASE_URL unset the API key above is the
+        # only gate, and it is public by construction -- the UI ships it in its
+        # JavaScript bundle. This is the difference between a deterrent and
+        # authentication.
+        logger.warning(
+            "SUPABASE_URL is not set; POST /podcasts accepts requests with no "
+            "verified user"
         )
 
     return application
@@ -287,7 +391,9 @@ async def get_universe(
     "/podcasts",
     response_model=PodcastDetail,
     status_code=202,
-    dependencies=[Depends(require_provision_api_key)],
+    # Both gates listed here, so an unauthenticated caller is refused before
+    # the body is parsed and long before any billable work starts.
+    dependencies=[Depends(require_provision_api_key), Depends(get_supabase_identity)],
 )
 async def create_podcast(
     payload: PodcastCreateRequest,
@@ -339,6 +445,8 @@ __all__ = [
     "Settings",
     "app",
     "build_podcast_generation_dependencies",
+    "get_supabase_identity",
+    "get_supabase_verifier",
     "get_url_signer",
     "get_point_reader",
     "get_podcast_generation_dependencies",
