@@ -1,0 +1,87 @@
+name: Deploy
+
+# Builds the container image, pushes it to ECR and points the Lambda function at
+# it. Infrastructure is NOT applied here -- Terraform owns memory, timeout,
+# environment and IAM, and the deploy role is deliberately limited to
+# lambda:UpdateFunctionCode so that CI cannot cause drift it did not intend.
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  # Two deploys racing would leave the function pointing at whichever
+  # update-function-code finished last, not the newer image.
+  group: deploy-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  # Required for OIDC. Without it the role assumption fails with a message that
+  # does not mention permissions.
+  id-token: write
+
+env:
+  AWS_REGION: us-east-1
+  FUNCTION_NAME: applepie-prod-data-provision-api
+  ECR_REPOSITORY: applepie-prod/data-provision-api
+
+jobs:
+  deploy:
+    name: Build and deploy
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          # Set this to the github_deploy_role_arn output of
+          # infrastructure/aws. It is an ARN, not a credential.
+          role-to-assume: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Log in to Amazon ECR
+        id: ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Build and push image
+        id: build
+        env:
+          REGISTRY: ${{ steps.ecr.outputs.registry }}
+        run: |
+          set -euo pipefail
+          # The commit SHA, not `latest`: the ECR repositories are configured
+          # with immutable tags, so a reused tag is an error rather than a
+          # silent change to what the function runs.
+          image="$REGISTRY/$ECR_REPOSITORY:${{ github.sha }}"
+          docker build --platform linux/amd64 -t "$image" .
+          docker push "$image"
+          echo "image=$image" >>"$GITHUB_OUTPUT"
+
+      - name: Point the function at the new image
+        run: |
+          set -euo pipefail
+          aws lambda update-function-code \
+            --function-name "$FUNCTION_NAME" \
+            --image-uri '${{ steps.build.outputs.image }}' \
+            --no-cli-pager >/dev/null
+          # update-function-code returns before the new image is live, so a
+          # smoke test without this would hit the old one.
+          aws lambda wait function-updated-v2 --function-name "$FUNCTION_NAME"
+
+      - name: Smoke the deployed function
+        env:
+          FUNCTION_URL: ${{ vars.PROVISION_FUNCTION_URL }}
+        run: |
+          set -euo pipefail
+          # The function URL is unauthenticated, so a plain request is the same
+          # thing a browser does.
+          status=$(curl -fsS -o /tmp/health.json -w '%{http_code}' "${FUNCTION_URL%/}/health")
+          cat /tmp/health.json
+          test "$status" = "200"
+          grep -q '"status":"ok"' /tmp/health.json
+
