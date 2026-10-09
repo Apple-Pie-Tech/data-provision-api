@@ -1,3 +1,5 @@
+import logging
+
 from fastapi.testclient import TestClient
 
 from app.main import (
@@ -129,6 +131,29 @@ def test_universe_endpoint_returns_503_when_vector_store_is_unavailable() -> Non
         assert response.status_code == 503
         assert response.json() == {"detail": "vector store unavailable"}
         assert reader.calls == 1
+    finally:
+        _clear_overrides()
+
+
+def test_universe_endpoint_logs_the_cause_of_a_503(caplog) -> None:
+    """The 503 body says nothing, so the log is the only record of why.
+
+    Pinned because the opaque body is deliberate: an empty or failing /universe
+    was bug E7, and a status code with no traceback is what made it hard.
+    """
+    reader = FailingPointReader()
+    app.dependency_overrides[get_point_reader] = lambda: reader
+    client = TestClient(app, raise_server_exceptions=False)
+
+    try:
+        with caplog.at_level(logging.ERROR, logger="app.main"):
+            response = client.get("/universe")
+
+        assert response.status_code == 503
+        records = [r for r in caplog.records if r.name == "app.main"]
+        assert records, "the cause was swallowed"
+        assert records[0].exc_info is not None
+        assert "qdrant unavailable" in caplog.text
     finally:
         _clear_overrides()
 

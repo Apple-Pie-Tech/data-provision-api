@@ -274,6 +274,11 @@ async def get_universe(
     try:
         points = await point_reader.read_points()
     except Exception as exc:
+        # The 503 body is deliberately opaque to the caller, so without this the
+        # cause is lost entirely: an empty or failing /universe was bug E7 and
+        # the only signal was the status code. `from exc` preserves the chain
+        # for a local traceback but writes nothing to the log in Lambda.
+        logger.exception("reading the vector store for /universe failed")
         raise HTTPException(status_code=503, detail="vector store unavailable") from exc
     return sign_universe_audio_urls(assemble_universe_graph(points), signer)
 

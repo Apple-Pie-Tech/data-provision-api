@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from typing import Any, Protocol
@@ -13,6 +14,9 @@ from app.podcast_clients import (  # pyright: ignore[reportMissingImports]
     PodcastTimeoutError,
 )
 from app.podcast_schemas import PodcastDetail, PodcastScript
+
+
+logger = logging.getLogger(__name__)
 from app.vector_store import VectorPoint  # pyright: ignore[reportMissingImports]
 
 
@@ -226,6 +230,12 @@ def mark_generation_failed(
     exc: Exception,
 ) -> PodcastDetail:
     error = normalize_generation_error(exc)
+    # The row deliberately carries an opaque message -- it is served to the UI --
+    # and an unexpected exception type is masked entirely by
+    # normalize_generation_error. Without this the only record of a real failure
+    # is the string "podcast generation failed", which names neither the step
+    # nor the cause. Proven live: a failed row with nothing in the log.
+    logger.exception("podcast %s generation failed", podcast_id)
     try:
         current = repository.get_by_id(podcast_id)
         if current is not None and current.status == "running":
